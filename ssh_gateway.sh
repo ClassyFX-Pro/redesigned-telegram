@@ -7,7 +7,7 @@ set -u
 DB_PATH="${VPS_DB_PATH:-vps.db}"
 
 echo "==================================================="
-echo " ExeCloudVM Web Terminal Gateway"
+echo " AlwayzPlayzZ VM 2 Web Terminal Gateway"
 echo "==================================================="
 read -p "Enter your one-time access code: " CODE
 
