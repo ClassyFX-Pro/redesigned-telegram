@@ -1951,11 +1951,76 @@ async def about(ctx):
 
 @bot.command(name='help')
 async def show_help(ctx):
-    embed = create_info_embed("📚 Command Help", "Core commands for this no-container build.")
-    add_field(embed, "👤 User", f"`{PREFIX}myvps`, `{PREFIX}manage`, `{PREFIX}ports`, `{PREFIX}about`", False)
-    add_field(embed, "🛡️ Admin", f"`{PREFIX}create`, `{PREFIX}delete-vps`, `{PREFIX}suspend-vps`, `{PREFIX}vps-list`, `{PREFIX}snapshot`, `{PREFIX}clone-vps`, `{PREFIX}node-check`", False)
-    add_field(embed, "⚠️ Reminder", "VPS here = a resource-limited Linux user account, not an isolated container/VM.", False)
+    """Show all commands registered with the bot."""
+
+    commands = [
+        command for command in bot.commands
+        if command.name != "help"
+    ]
+
+    commands.sort(key=lambda command: command.qualified_name.lower())
+
+    # Build command list while staying under Discord's 1024-character field limit
+    chunks = []
+    current_chunk = []
+
+    for command in commands:
+        command_text = f"`{PREFIX}{command.qualified_name}`"
+
+        if command.help:
+            description = command.help.strip().splitlines()[0]
+            command_text += f" — {description}"
+
+        proposed = "\n".join(current_chunk + [command_text])
+
+        if current_chunk and len(proposed) > 1000:
+            chunks.append("\n".join(current_chunk))
+            current_chunk = []
+
+        current_chunk.append(command_text)
+
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+
+    embed = create_info_embed(
+        "📚 Command Help",
+        f"All available {BOT_NAME} commands"
+    )
+
+    if not chunks:
+        add_field(
+            embed,
+            "Commands",
+            "No commands are currently registered.",
+            False
+        )
+        await ctx.send(embed=embed)
+        return
+
+    for index, chunk in enumerate(chunks):
+        add_field(
+            embed,
+            "📖 Commands" if index == 0 else "📖 Commands (continued)",
+            chunk,
+            False
+        )
+
+        # Discord embeds support a maximum of 25 fields
+        if len(embed.fields) >= 24 and index < len(chunks) - 1:
+            await ctx.send(embed=embed)
+
+            embed = create_info_embed(
+                "📚 Command Help (continued)",
+                f"More {BOT_NAME} commands"
+            )
+
     await ctx.send(embed=embed)
+
+if __name__ == "__main__":
+    if DISCORD_TOKEN:
+        bot.run(DISCORD_TOKEN)
+    else:
+        logger.error("No Discord token found in DISCORD_TOKEN environment variable.")
 
 if __name__ == "__main__":
     if DISCORD_TOKEN:
