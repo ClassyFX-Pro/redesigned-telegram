@@ -49,7 +49,7 @@ import re
 
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN', '')
 BOT_NAME = os.getenv('BOT_NAME', 'AlwayzPlayzZ')
-PREFIX = os.getenv('PREFIX', '!')
+PREFIX = os.getenv('PREFIX', '?')
 YOUR_SERVER_IP = os.getenv('YOUR_SERVER_IP', '127.0.0.1')
 MAIN_ADMIN_ID = int(os.getenv('MAIN_ADMIN_ID', ''))
 VPS_USER_ROLE_ID = int(os.getenv('VPS_USER_ROLE_ID', ''))
