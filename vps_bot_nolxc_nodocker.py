@@ -373,26 +373,56 @@ async def ensure_prereqs(node_id: int):
 _TTYD_STARTED = {"value": False}
 
 async def ensure_ttyd_gateway_running(node_id: int = 1):
-    """Starts the single shared ttyd web-terminal gateway if it isn't
-    already running. Only needs to run once per process lifetime - safe to
-    call repeatedly."""
+    """Start the shared ttyd web-terminal gateway once using a PID file."""
     if _TTYD_STARTED["value"]:
         return
+
+    pidfile = "/tmp/execloud_ttyd_gateway.pid"
+    logfile = f"{LOG_DIR}/ttyd_gateway.log"
+
     try:
-        already = await execute_host("", "pgrep -f 'ttyd .*ssh_gateway.sh' | head -1", node_id=node_id, timeout=10)
-        if str(already).strip():
-            _TTYD_STARTED["value"] = True
-            return
-    except Exception:
-        pass
-    try:
-        cmd = (
-            f"nohup ttyd -p {TTYD_PORT} -W bash {GATEWAY_SCRIPT_PATH} "
-            f">{LOG_DIR}/ttyd_gateway.log 2>&1 < /dev/null & echo $!"
+        # Do not use pgrep -f here: the pgrep command can match its own
+        # command line and falsely report that ttyd is already running.
+        check_cmd = (
+            f"if [ -f {pidfile} ] && kill -0 $(cat {pidfile}) 2>/dev/null; "
+            f"then echo running; else echo stopped; fi"
         )
-        pid = await execute_host("", cmd, node_id=node_id, timeout=15)
-        logger.info(f"Started ttyd web-terminal gateway on port {TTYD_PORT} (pid {str(pid).strip()})")
+        status = await execute_host("", check_cmd, node_id=node_id, timeout=10)
+
+        if str(status).strip() == "running":
+            _TTYD_STARTED["value"] = True
+            logger.info(f"ttyd gateway already running on port {TTYD_PORT}")
+            return
+
+        cmd = (
+            f"mkdir -p {LOG_DIR} && "
+            f"nohup ttyd -p {TTYD_PORT} -W bash {GATEWAY_SCRIPT_PATH} "
+            f">{logfile} 2>&1 < /dev/null & "
+            f"echo $! > {pidfile}"
+        )
+        await execute_host("", cmd, node_id=node_id, timeout=15)
+
+        # Verify that the process actually survived startup.
+        verify_cmd = (
+            f"sleep 1; if [ -f {pidfile} ] && kill -0 $(cat {pidfile}) 2>/dev/null; "
+            f"then echo running; else echo failed; fi"
+        )
+        verify = await execute_host("", verify_cmd, node_id=node_id, timeout=10)
+
+        if str(verify).strip() != "running":
+            logger.error(
+                f"ttyd failed to start on port {TTYD_PORT}. "
+                f"Check {logfile} on the node."
+            )
+            return
+
+        pid = await execute_host("", f"cat {pidfile}", node_id=node_id, timeout=10)
+        logger.info(
+            f"Started ttyd web-terminal gateway on port {TTYD_PORT} "
+            f"(pid {str(pid).strip()})"
+        )
         _TTYD_STARTED["value"] = True
+
     except Exception as e:
         logger.error(f"Failed to start ttyd gateway: {e}")
 
