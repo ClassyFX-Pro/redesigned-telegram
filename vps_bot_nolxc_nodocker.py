@@ -64,6 +64,17 @@ VPS_DB_PATH = os.getenv('VPS_DB_PATH', 'vps.db')
 CGROUP_ROOT = os.getenv('CGROUP_ROOT', '/sys/fs/cgroup/vpsbot')
 LOG_DIR = os.getenv('VPS_LOG_DIR', '/var/log/vpsbot')
 
+# Web-terminal gateway (replaces tmate, which needs an outbound connection
+# to a public relay server that platforms like Railway block). Instead,
+# ttyd serves ONE web terminal on Railway's public port; a tiny gateway
+# script prompts for a one-time code and drops the user into the right
+# Linux user's shell if it matches. This only needs INBOUND traffic to
+# Railway's public port, which Railway is built to support.
+TTYD_PORT = int(os.getenv('PORT', os.getenv('TTYD_PORT', '8080')))
+PUBLIC_URL = os.getenv('RAILWAY_PUBLIC_DOMAIN', '')  # auto-set by Railway when a public domain is attached
+GATEWAY_SCRIPT_PATH = os.getenv('GATEWAY_SCRIPT_PATH', '/app/ssh_gateway.sh')
+ACCESS_CODE_TTL_SECONDS = 600
+
 # Whether cgroup-based resource limits actually work on this host. Detected
 # once at startup in on_ready() / checked lazily; kept here so every part of
 # the bot can report the same truth to users instead of guessing per-call.
@@ -143,6 +154,9 @@ def init_db():
         cur.execute("ALTER TABLE port_forwards ADD COLUMN tcp_pid TEXT DEFAULT ''")
     if 'udp_pid' not in pf_columns:
         cur.execute("ALTER TABLE port_forwards ADD COLUMN udp_pid TEXT DEFAULT ''")
+    cur.execute('''CREATE TABLE IF NOT EXISTS access_codes (
+        code TEXT PRIMARY KEY, container_name TEXT NOT NULL, expires_at INTEGER NOT NULL
+    )''')
     conn.commit()
     conn.close()
 
@@ -354,6 +368,49 @@ async def ensure_prereqs(node_id: int):
         await execute_host("", f"mkdir -p {CGROUP_ROOT} {LOG_DIR}", node_id=node_id, timeout=15)
     except Exception as e:
         logger.error(f"Could not create bot dirs on node {node_id}: {e}")
+
+
+_TTYD_STARTED = {"value": False}
+
+async def ensure_ttyd_gateway_running(node_id: int = 1):
+    """Starts the single shared ttyd web-terminal gateway if it isn't
+    already running. Only needs to run once per process lifetime - safe to
+    call repeatedly."""
+    if _TTYD_STARTED["value"]:
+        return
+    try:
+        already = await execute_host("", "pgrep -f 'ttyd .*ssh_gateway.sh' | head -1", node_id=node_id, timeout=10)
+        if str(already).strip():
+            _TTYD_STARTED["value"] = True
+            return
+    except Exception:
+        pass
+    try:
+        cmd = (
+            f"nohup ttyd -p {TTYD_PORT} -W bash {GATEWAY_SCRIPT_PATH} "
+            f">{LOG_DIR}/ttyd_gateway.log 2>&1 < /dev/null & echo $!"
+        )
+        pid = await execute_host("", cmd, node_id=node_id, timeout=15)
+        logger.info(f"Started ttyd web-terminal gateway on port {TTYD_PORT} (pid {str(pid).strip()})")
+        _TTYD_STARTED["value"] = True
+    except Exception as e:
+        logger.error(f"Failed to start ttyd gateway: {e}")
+
+
+def generate_access_code(container_name: str) -> str:
+    code = ''.join(random.choices('abcdefghjkmnpqrstuvwxyz23456789', k=8))  # no ambiguous chars
+    expires_at = int(time.time()) + ACCESS_CODE_TTL_SECONDS
+    conn = get_db(); cur = conn.cursor()
+    cur.execute('DELETE FROM access_codes WHERE container_name = ?', (container_name,))  # one active code per VPS
+    cur.execute('INSERT INTO access_codes (code, container_name, expires_at) VALUES (?, ?, ?)', (code, container_name, expires_at))
+    conn.commit(); conn.close()
+    return code
+
+
+def gateway_public_url() -> str:
+    if PUBLIC_URL:
+        return f"https://{PUBLIC_URL}"
+    return f"http://<your-railway-public-domain>:{TTYD_PORT}  (set up a Public Domain for this service in Railway → Settings → Networking)"
 
 
 async def create_vps_user(container_name: str, ram_mb: int, cpu_cores: int, node_id: int):
@@ -810,6 +867,8 @@ async def on_ready():
             await ensure_prereqs(node['id'])
             usable = await detect_cgroups_usable(node['id'])
             logger.info(f"Node {node['name']}: cgroup resource limits {'ENABLED' if usable else 'NOT AVAILABLE (tracking only)'}")
+            if node['is_local']:
+                await ensure_ttyd_gateway_running(node['id'])
         except Exception as e:
             logger.error(f"Prereq setup failed on node {node['id']}: {e}")
     try:
@@ -1131,47 +1190,21 @@ class ManageView(discord.ui.View):
             if suspended:
                 await interaction.followup.send(embed=create_error_embed("Access Denied", "Cannot access suspended VPS."), ephemeral=True)
                 return
-            await interaction.followup.send(embed=create_info_embed("SSH Access", "Generating SSH connection..."), ephemeral=True)
             try:
+                await ensure_ttyd_gateway_running(node_id)
+                code = generate_access_code(container_name)
+                url = gateway_public_url()
+                ssh_embed = create_embed("🔑 Web Terminal Access", "SSH doesn't work on this host (outbound connections are blocked), so this uses a browser-based terminal instead:", 0x00ff88)
+                add_field(ssh_embed, "1. Open this URL", url, False)
+                add_field(ssh_embed, "2. Enter this one-time code", f"```{code}```", False)
+                add_field(ssh_embed, "⚠️ Security", f"This code expires in {ACCESS_CODE_TTL_SECONDS // 60} minutes and can only be used once. Do not share it.", False)
                 try:
-                    await exec_in_vps(container_name, "which tmate", node_id)
-                except Exception:
-                    await interaction.followup.send(embed=create_info_embed("Installing SSH", "Installing tmate (host-wide, shared across all VPS users)..."), ephemeral=True)
-                    await execute_host(container_name, "apt-get update -y && apt-get install -y tmate", node_id=node_id, timeout=180)
-                    await interaction.followup.send(embed=create_success_embed("Installed", "SSH service installed!"), ephemeral=True)
-                session_name = f"{BOT_NAME.lower()}-session-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                sock = f"/tmp/{session_name}.sock"
-                await exec_in_vps(container_name, f"tmate -S {sock} new-session -d", node_id)
-                try:
-                    # Blocks until tmate has actually connected to the relay
-                    # server and has real ssh/web info ready, instead of
-                    # guessing with a fixed sleep.
-                    await exec_in_vps(container_name, f"tmate -S {sock} wait tmate-ready", node_id, timeout=30)
-                except Exception as wait_err:
-                    await interaction.followup.send(embed=create_error_embed(
-                        "SSH Error",
-                        f"tmate never became ready (usually a network/outbound-connectivity issue reaching the tmate relay server). "
-                        f"Details: {str(wait_err)[:400]}"), ephemeral=True)
-                    return
-                ssh_output = await exec_in_vps(container_name, f"tmate -S {sock} display -p '#{{tmate_ssh}}'", node_id)
-                ssh_url = str(ssh_output).strip()
-                if ssh_url:
-                    try:
-                        ssh_embed = create_embed("🔑 SSH Access", f"SSH connection for VPS `{container_name}`:", 0x00ff88)
-                        add_field(ssh_embed, "Command", f"```{ssh_url}```", False)
-                        add_field(ssh_embed, "⚠️ Security", "This link is temporary. Do not share it.", False)
-                        add_field(ssh_embed, "📝 Session", f"Session ID: {session_name}", False)
-                        await interaction.user.send(embed=ssh_embed)
-                        await interaction.followup.send(embed=create_success_embed("SSH Sent", f"Check your DMs for SSH link! Session: {session_name}"), ephemeral=True)
-                    except discord.Forbidden:
-                        await interaction.followup.send(embed=create_error_embed("DM Failed", "Enable DMs to receive SSH link!"), ephemeral=True)
-                else:
-                    web_output = await exec_in_vps(container_name, f"tmate -S {sock} display -p '#{{tmate_web}}'", node_id)
-                    await interaction.followup.send(embed=create_error_embed(
-                        "SSH Failed",
-                        f"tmate reported ready but returned no SSH string. Web fallback: `{str(web_output).strip() or 'none'}`"), ephemeral=True)
+                    await interaction.user.send(embed=ssh_embed)
+                    await interaction.followup.send(embed=create_success_embed("Access Code Sent", "Check your DMs for the web terminal link and code!"), ephemeral=True)
+                except discord.Forbidden:
+                    await interaction.followup.send(embed=ssh_embed, ephemeral=True)
             except Exception as e:
-                await interaction.followup.send(embed=create_error_embed("SSH Error", str(e)), ephemeral=True)
+                await interaction.followup.send(embed=create_error_embed("Access Failed", str(e)), ephemeral=True)
         new_embed = await self.create_vps_embed(self.selected_index)
         await interaction.edit_original_response(embed=new_embed, view=self)
 
