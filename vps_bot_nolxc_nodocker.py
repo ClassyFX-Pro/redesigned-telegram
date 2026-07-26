@@ -1140,9 +1140,20 @@ class ManageView(discord.ui.View):
                     await execute_host(container_name, "apt-get update -y && apt-get install -y tmate", node_id=node_id, timeout=180)
                     await interaction.followup.send(embed=create_success_embed("Installed", "SSH service installed!"), ephemeral=True)
                 session_name = f"{BOT_NAME.lower()}-session-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                await exec_in_vps(container_name, f"tmate -S /tmp/{session_name}.sock new-session -d", node_id)
-                await asyncio.sleep(3)
-                ssh_output = await exec_in_vps(container_name, f"tmate -S /tmp/{session_name}.sock display -p '#{{tmate_ssh}}'", node_id)
+                sock = f"/tmp/{session_name}.sock"
+                await exec_in_vps(container_name, f"tmate -S {sock} new-session -d", node_id)
+                try:
+                    # Blocks until tmate has actually connected to the relay
+                    # server and has real ssh/web info ready, instead of
+                    # guessing with a fixed sleep.
+                    await exec_in_vps(container_name, f"tmate -S {sock} wait tmate-ready", node_id, timeout=30)
+                except Exception as wait_err:
+                    await interaction.followup.send(embed=create_error_embed(
+                        "SSH Error",
+                        f"tmate never became ready (usually a network/outbound-connectivity issue reaching the tmate relay server). "
+                        f"Details: {str(wait_err)[:400]}"), ephemeral=True)
+                    return
+                ssh_output = await exec_in_vps(container_name, f"tmate -S {sock} display -p '#{{tmate_ssh}}'", node_id)
                 ssh_url = str(ssh_output).strip()
                 if ssh_url:
                     try:
@@ -1155,7 +1166,10 @@ class ManageView(discord.ui.View):
                     except discord.Forbidden:
                         await interaction.followup.send(embed=create_error_embed("DM Failed", "Enable DMs to receive SSH link!"), ephemeral=True)
                 else:
-                    await interaction.followup.send(embed=create_error_embed("SSH Failed", "No SSH URL generated."), ephemeral=True)
+                    web_output = await exec_in_vps(container_name, f"tmate -S {sock} display -p '#{{tmate_web}}'", node_id)
+                    await interaction.followup.send(embed=create_error_embed(
+                        "SSH Failed",
+                        f"tmate reported ready but returned no SSH string. Web fallback: `{str(web_output).strip() or 'none'}`"), ephemeral=True)
             except Exception as e:
                 await interaction.followup.send(embed=create_error_embed("SSH Error", str(e)), ephemeral=True)
         new_embed = await self.create_vps_embed(self.selected_index)
