@@ -57,6 +57,10 @@ BOT_VERSION = os.getenv('BOT_VERSION', '7.0-PRO-NOCONTAINER')
 BOT_DEVELOPER = os.getenv('BOT_DEVELOPER', '')
 
 VPS_HOME_ROOT = os.getenv('VPS_HOME_ROOT', '/home')
+# Point this at your Railway Volume mount path (e.g. /data/vps.db) so VPS
+# records survive redeploys. Left as 'vps.db' (cwd) it will be wiped along
+# with everything else on every redeploy.
+VPS_DB_PATH = os.getenv('VPS_DB_PATH', 'vps.db')
 CGROUP_ROOT = os.getenv('CGROUP_ROOT', '/sys/fs/cgroup/vpsbot')
 LOG_DIR = os.getenv('VPS_LOG_DIR', '/var/log/vpsbot')
 
@@ -90,7 +94,7 @@ logger = logging.getLogger(f'{BOT_NAME.lower()}_vps_bot')
 # DATABASE
 # ─────────────────────────────────────────────────────────────────────────
 def get_db():
-    conn = sqlite3.connect('vps.db')
+    conn = sqlite3.connect(VPS_DB_PATH)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
     return conn
@@ -664,11 +668,11 @@ def resource_monitor():
             if time.time() - last_backup > backup_interval:
                 backup_name = f"vps_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
                 try:
-                    shutil.copy('vps.db', backup_name)
-                    if os.path.exists('vps.db-wal'):
-                        shutil.copy('vps.db-wal', f"{backup_name}-wal")
-                    if os.path.exists('vps.db-shm'):
-                        shutil.copy('vps.db-shm', f"{backup_name}-shm")
+                    shutil.copy(VPS_DB_PATH, backup_name)
+                    if os.path.exists(f'{VPS_DB_PATH}-wal'):
+                        shutil.copy(f'{VPS_DB_PATH}-wal', f"{backup_name}-wal")
+                    if os.path.exists(f'{VPS_DB_PATH}-shm'):
+                        shutil.copy(f'{VPS_DB_PATH}-shm', f"{backup_name}-shm")
                     last_backup = time.time()
                 except Exception as e:
                     logger.error(f"Failed to create DB backup: {e}")
@@ -762,6 +766,41 @@ async def get_node_status(node_id: int) -> str:
         logger.error(f"Failed to ping node {node['name']}: {e}")
         return "🔴 Offline"
 
+async def recover_vps_after_redeploy():
+    """On platforms like Railway, the container filesystem (and therefore
+    /etc/passwd, running processes, and anything not on a mounted Volume)
+    is wiped on every redeploy or restart. This re-creates the Linux user
+    for every VPS still recorded in the DB, restarts its anchor process if
+    it was supposed to be running, and re-establishes port forwards - so
+    a redeploy degrades to "brief downtime + fresh home dirs" instead of
+    "all VPS silently gone until an admin notices"."""
+    recovered = 0
+    failed = 0
+    for user_id, vps_list in vps_data.items():
+        for vps in vps_list:
+            container_name = vps['container_name']
+            node_id = vps.get('node_id', 1)
+            try:
+                exists = await execute_host(container_name, f"id -u {container_name} >/dev/null 2>&1 && echo yes || echo no", node_id=node_id)
+                user_missing = "yes" not in str(exists)
+                if user_missing:
+                    ram_mb = int(vps['ram'].replace('GB', '')) * 1024
+                    cpu = int(vps['cpu'])
+                    await create_vps_user(container_name, ram_mb, cpu, node_id)
+                    logger.warning(f"Recreated missing Linux user '{container_name}' after redeploy "
+                                   f"(home directory contents are lost unless {VPS_HOME_ROOT} is on a persistent volume)")
+                if vps.get('status') == 'running' and not vps.get('suspended', False):
+                    pid = await start_anchor_process(container_name, node_id)
+                    vps['anchor_pid'] = pid
+                    await recreate_port_forwards(container_name)
+                recovered += 1
+            except Exception as e:
+                failed += 1
+                logger.error(f"Failed to recover VPS '{container_name}' after redeploy: {e}")
+    save_vps_data()
+    if recovered or failed:
+        logger.info(f"Redeploy recovery: {recovered} VPS recovered, {failed} failed - check logs above for details")
+
 @bot.event
 async def on_ready():
     logger.info(f'{bot.user} has connected to Discord!')
@@ -773,6 +812,10 @@ async def on_ready():
             logger.info(f"Node {node['name']}: cgroup resource limits {'ENABLED' if usable else 'NOT AVAILABLE (tracking only)'}")
         except Exception as e:
             logger.error(f"Prereq setup failed on node {node['id']}: {e}")
+    try:
+        await recover_vps_after_redeploy()
+    except Exception as e:
+        logger.error(f"Redeploy recovery pass failed: {e}")
     logger.info(f"{BOT_NAME} Bot is ready! (no-container / plain Linux-user backend)")
 
 @bot.event
@@ -1762,9 +1805,9 @@ async def node_check(ctx, node_id: int):
 async def backup_db(ctx):
     backup_name = f"vps_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
     try:
-        shutil.copy('vps.db', backup_name)
-        if os.path.exists('vps.db-wal'): shutil.copy('vps.db-wal', f"{backup_name}-wal")
-        if os.path.exists('vps.db-shm'): shutil.copy('vps.db-shm', f"{backup_name}-shm")
+        shutil.copy(VPS_DB_PATH, backup_name)
+        if os.path.exists(f'{VPS_DB_PATH}-wal'): shutil.copy(f'{VPS_DB_PATH}-wal', f"{backup_name}-wal")
+        if os.path.exists(f'{VPS_DB_PATH}-shm'): shutil.copy(f'{VPS_DB_PATH}-shm', f"{backup_name}-shm")
         await ctx.send(embed=create_success_embed("DB Backup Created", f"Backup saved as `{backup_name}`."))
     except Exception as e:
         await ctx.send(embed=create_error_embed("Backup Failed", f"Error: {str(e)}"))
