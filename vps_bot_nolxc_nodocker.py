@@ -15,6 +15,10 @@ import sqlite3
 import random
 import requests
 import re
+import html
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+import secrets
 
 # ─────────────────────────────────────────────────────────────────────────
 # NO LXC, NO DOCKER DAEMON VERSION
@@ -48,8 +52,8 @@ import re
 # ─────────────────────────────────────────────────────────────────────────
 
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN', '')
-BOT_NAME = os.getenv('BOT_NAME', 'AlwayzPlayzZ')
-PREFIX = os.getenv('PREFIX', '?')
+BOT_NAME = os.getenv('BOT_NAME', 'UnixNodes')
+PREFIX = os.getenv('PREFIX', '!')
 YOUR_SERVER_IP = os.getenv('YOUR_SERVER_IP', '127.0.0.1')
 MAIN_ADMIN_ID = int(os.getenv('MAIN_ADMIN_ID', ''))
 VPS_USER_ROLE_ID = int(os.getenv('VPS_USER_ROLE_ID', ''))
@@ -74,6 +78,12 @@ TTYD_PORT = int(os.getenv('PORT', os.getenv('TTYD_PORT', '8080')))
 PUBLIC_URL = os.getenv('RAILWAY_PUBLIC_DOMAIN', '')  # auto-set by Railway when a public domain is attached
 GATEWAY_SCRIPT_PATH = os.getenv('GATEWAY_SCRIPT_PATH', '/app/ssh_gateway.sh')
 ACCESS_CODE_TTL_SECONDS = 600
+
+# Admin web dashboard
+DASHBOARD_PORT = int(os.getenv('DASHBOARD_PORT', '2026'))
+DASHBOARD_USERNAME = os.getenv('DASHBOARD_USERNAME', 'admin')
+DASHBOARD_PASSWORD = os.getenv('DASHBOARD_PASSWORD', '')
+DASHBOARD_SECRET = os.getenv('DASHBOARD_SECRET', secrets.token_urlsafe(32))
 
 # Whether cgroup-based resource limits actually work on this host. Detected
 # once at startup in on_ready() / checked lazily; kept here so every part of
@@ -448,11 +458,17 @@ async def create_vps_user(container_name: str, ram_mb: int, cpu_cores: int, node
     await execute_host(container_name,
                         f"id -u {container_name} >/dev/null 2>&1 || useradd -m -d {home} -s /bin/bash {container_name}",
                         node_id=node_id)
-    # lock direct password login - access is only via exec/tmate from the bot
+    # Default password is "root" and the VPS user receives sudo privileges.
     try:
-        await execute_host(container_name, f"passwd -l {container_name}", node_id=node_id)
-    except Exception:
-        pass
+        password = os.getenv("VPS_DEFAULT_PASSWORD", "root")
+        password_q = shlex.quote(container_name + ":" + password)
+        await execute_host(
+            container_name,
+            f"printf '%s\n' {password_q} | chpasswd && usermod -aG sudo {shlex.quote(container_name)}",
+            node_id=node_id
+        )
+    except Exception as e:
+        logger.warning(f"Could not configure default password/sudo for {container_name}: {e}")
     if await detect_cgroups_usable(node_id):
         cg = f"{CGROUP_ROOT}/{container_name}"
         try:
@@ -623,9 +639,9 @@ def truncate_text(text, max_length=1024):
 def create_embed(title, description="", color=0x1a1a1a):
     embed = discord.Embed(title=truncate_text(f"🌟 {BOT_NAME} - {title}", 256),
                            description=truncate_text(description, 4096), color=color)
-    embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1530821352032964682/1530828818472898590/b6a2ddc9ad5a879f723f5cc9f238471d.png?ex=6a66feef&is=6a65ad6f&hm=e7e16b8c57980eab1b4a6ed9c8088cfa764e27ca8ca66e28964fe081b4ca67db")
+    embed.set_thumbnail(url="https://i.imgur.com/Tv3clt0.jpeg")
     embed.set_footer(text=f"{BOT_NAME} VPS Manager v{BOT_VERSION} • {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                      icon_url="https://cdn.discordapp.com/attachments/1530821352032964682/1530828818472898590/b6a2ddc9ad5a879f723f5cc9f238471d.png?ex=6a66feef&is=6a65ad6f&hm=e7e16b8c57980eab1b4a6ed9c8088cfa764e27ca8ca66e28964fe081b4ca67db")
+                      icon_url="https://i.imgur.com/Tv3clt0.jpeg")
     return embed
 
 def add_field(embed, name, value, inline=False):
@@ -888,9 +904,169 @@ async def recover_vps_after_redeploy():
     if recovered or failed:
         logger.info(f"Redeploy recovery: {recovered} VPS recovered, {failed} failed - check logs above for details")
 
+
+# ─────────────────────────────────────────────────────────────────────────
+# ADMIN WEB DASHBOARD (port 2026)
+# ─────────────────────────────────────────────────────────────────────────
+_DASHBOARD_SERVER = None
+_DASHBOARD_SESSIONS = set()
+_DASHBOARD_BANNED_IPS = set()
+
+
+def _dashboard_cookie(token: str) -> str:
+    return f"session={token}; Path=/; HttpOnly; SameSite=Strict"
+
+
+def _dashboard_authenticated(handler) -> bool:
+    if handler.client_address[0] in _DASHBOARD_BANNED_IPS:
+        return False
+    cookie = handler.headers.get("Cookie", "")
+    return any(part.strip().startswith("session=") and part.strip().split("=", 1)[1] in _DASHBOARD_SESSIONS for part in cookie.split(";"))
+
+
+def _dashboard_html(message=""):
+    rows = []
+    for owner_id, items in vps_data.items():
+        for idx, vps in enumerate(items, 1):
+            status = "SUSPENDED" if vps.get("suspended") else vps.get("status", "unknown").upper()
+            name = html.escape(vps.get("container_name", "unknown"))
+            rows.append(f"""
+            <tr>
+              <td>{html.escape(str(owner_id))}</td><td>{idx}</td><td><code>{name}</code></td>
+              <td>{html.escape(status)}</td><td>{html.escape(vps.get('config','Custom'))}</td>
+              <td>
+                <form method='post' action='/action' style='display:inline'><input type='hidden' name='action' value='start'><input type='hidden' name='container' value='{html.escape(name)}'><button>Start</button></form>
+                <form method='post' action='/action' style='display:inline'><input type='hidden' name='action' value='stop'><input type='hidden' name='container' value='{html.escape(name)}'><button>Stop</button></form>
+                <form method='post' action='/action' style='display:inline'><input type='hidden' name='action' value='suspend'><input type='hidden' name='container' value='{html.escape(name)}'><button>Suspend</button></form>
+                <form method='post' action='/action' style='display:inline'><input type='hidden' name='action' value='unsuspend'><input type='hidden' name='container' value='{html.escape(name)}'><button>Unsuspend</button></form>
+                <form method='post' action='/action' style='display:inline' onsubmit="return confirm('Delete this VPS?')"><input type='hidden' name='action' value='delete'><input type='hidden' name='container' value='{html.escape(name)}'><button>Delete</button></form>
+              </td>
+            </tr>""")
+    if not rows:
+        rows.append("<tr><td colspan='6'>No VPS found.</td></tr>")
+    return f"""<!doctype html><html><head><meta charset='utf-8'><title>{html.escape(BOT_NAME)} Dashboard</title>
+    <style>body{{font-family:Arial;background:#111;color:#eee;margin:30px}}table{{width:100%;border-collapse:collapse}}td,th{{border:1px solid #444;padding:8px;text-align:left}}button{{margin:2px;padding:5px 8px}}a{{color:#8cf}}.msg{{padding:10px;background:#222;margin-bottom:15px}}</style></head>
+    <body><h1>{html.escape(BOT_NAME)} Admin Dashboard</h1>{('<div class="msg">'+html.escape(message)+'</div>') if message else ''}
+    <p>VPS: {sum(len(x) for x in vps_data.values())} | Users: {len(vps_data)} | <a href='/logout'>Logout</a></p>
+    <table><tr><th>Owner ID</th><th>VPS</th><th>Account</th><th>Status</th><th>Resources</th><th>Actions</th></tr>{''.join(rows)}</table>
+    </body></html>"""
+
+
+class DashboardHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        logger.info("Dashboard %s - %s", self.address_string(), format % args)
+
+    def _send(self, status, body, content_type='text/html; charset=utf-8', headers=None):
+        data = body.encode('utf-8') if isinstance(body, str) else body
+        self.send_response(status); self.send_header('Content-Type', content_type); self.send_header('Content-Length', str(len(data)))
+        for k, v in (headers or {}).items(): self.send_header(k, v)
+        self.end_headers(); self.wfile.write(data)
+
+    def _redirect(self, path):
+        self._send(303, '', headers={'Location': path})
+
+    def _login_page(self, error=''):
+        return f"""<!doctype html><html><head><meta charset='utf-8'><title>Admin Login</title></head><body style='font-family:Arial;background:#111;color:#eee;margin:40px'><h1>{html.escape(BOT_NAME)} Dashboard</h1><form method='post' action='/login'><input name='username' placeholder='Username' required><br><br><input type='password' name='password' placeholder='Password' required><br><br><button>Login</button></form><p>{html.escape(error)}</p></body></html>"""
+
+    def do_GET(self):
+        ip = self.client_address[0]
+        if ip in _DASHBOARD_BANNED_IPS:
+            return self._send(403, 'Forbidden')
+        path = urlparse(self.path).path
+        if path == '/login': return self._send(200, self._login_page())
+        if path == '/logout':
+            cookie = self.headers.get('Cookie', '')
+            for part in cookie.split(';'):
+                if part.strip().startswith('session='):
+                    _DASHBOARD_SESSIONS.discard(part.strip().split('=', 1)[1])
+            return self._redirect('/login')
+        if not _dashboard_authenticated(self): return self._redirect('/login')
+        if path == '/': return self._send(200, _dashboard_html())
+        return self._send(404, 'Not found')
+
+    def do_POST(self):
+        ip = self.client_address[0]
+        if ip in _DASHBOARD_BANNED_IPS: return self._send(403, 'Forbidden')
+        length = int(self.headers.get('Content-Length', '0'))
+        body = self.rfile.read(length).decode('utf-8', errors='replace')
+        data = {k: v[0] for k, v in parse_qs(body).items()}
+        path = urlparse(self.path).path
+        if path == '/login':
+            if secrets.compare_digest(data.get('username', ''), DASHBOARD_USERNAME) and DASHBOARD_PASSWORD and secrets.compare_digest(data.get('password', ''), DASHBOARD_PASSWORD):
+                token = secrets.token_urlsafe(32); _DASHBOARD_SESSIONS.add(token)
+                return self._send(303, '', headers={'Location': '/', 'Set-Cookie': _dashboard_cookie(token)})
+            return self._send(401, self._login_page('Invalid credentials. Set DASHBOARD_PASSWORD in Railway Variables.'))
+        if not _dashboard_authenticated(self): return self._redirect('/login')
+        if path != '/action': return self._send(404, 'Not found')
+        action, container = data.get('action', ''), data.get('container', '')
+        if not container or not any(v.get('container_name') == container for items in vps_data.values() for v in items):
+            return self._redirect('/')
+        future = None
+        if action == 'start': future = asyncio.run_coroutine_threadsafe(self._start(container), bot.loop)
+        elif action == 'stop': future = asyncio.run_coroutine_threadsafe(self._stop(container), bot.loop)
+        elif action == 'suspend': future = asyncio.run_coroutine_threadsafe(self._suspend(container), bot.loop)
+        elif action == 'unsuspend': future = asyncio.run_coroutine_threadsafe(self._unsuspend(container), bot.loop)
+        elif action == 'delete': future = asyncio.run_coroutine_threadsafe(self._delete(container), bot.loop)
+        if future:
+            try: future.result(timeout=60)
+            except Exception as e: logger.error('Dashboard action failed: %s', e)
+        return self._redirect('/')
+
+    async def _find(self, container):
+        for uid, items in vps_data.items():
+            for vps in items:
+                if vps.get('container_name') == container: return uid, vps
+        return None, None
+
+    async def _start(self, container):
+        uid, vps = await self._find(container)
+        if not vps: return
+        pid = await start_vps(container, vps.get('node_id', 1)); vps['anchor_pid'] = pid or vps.get('anchor_pid', '')
+        vps['status'] = 'running'; vps['suspended'] = False; save_vps_data()
+
+    async def _stop(self, container):
+        uid, vps = await self._find(container)
+        if not vps: return
+        await stop_vps(container, vps.get('node_id', 1)); vps['status'] = 'stopped'; save_vps_data()
+
+    async def _suspend(self, container):
+        uid, vps = await self._find(container)
+        if not vps: return
+        await stop_vps(container, vps.get('node_id', 1)); vps['status'] = 'stopped'; vps['suspended'] = True; save_vps_data()
+
+    async def _unsuspend(self, container):
+        uid, vps = await self._find(container)
+        if not vps: return
+        pid = await start_vps(container, vps.get('node_id', 1)); vps['anchor_pid'] = pid or vps.get('anchor_pid', '')
+        vps['status'] = 'running'; vps['suspended'] = False; save_vps_data()
+
+    async def _delete(self, container):
+        uid, vps = await self._find(container)
+        if not vps: return
+        await delete_vps_user(container, vps.get('node_id', 1))
+        conn = get_db(); cur = conn.cursor(); cur.execute('DELETE FROM vps WHERE container_name=?', (container,)); cur.execute('DELETE FROM port_forwards WHERE vps_container=?', (container,)); cur.execute('DELETE FROM access_codes WHERE container_name=?', (container,)); conn.commit(); conn.close()
+        vps_data[uid] = [x for x in vps_data[uid] if x.get('container_name') != container]
+        if not vps_data[uid]: del vps_data[uid]
+        save_vps_data()
+
+
+def start_dashboard_server():
+    global _DASHBOARD_SERVER
+    if _DASHBOARD_SERVER is not None: return
+    if not DASHBOARD_PASSWORD:
+        logger.warning('Dashboard disabled: DASHBOARD_PASSWORD is not set.')
+        return
+    try:
+        _DASHBOARD_SERVER = ThreadingHTTPServer(('0.0.0.0', DASHBOARD_PORT), DashboardHandler)
+        threading.Thread(target=_DASHBOARD_SERVER.serve_forever, name='dashboard-server', daemon=True).start()
+        logger.info('Admin dashboard listening on port %s', DASHBOARD_PORT)
+    except Exception as e:
+        logger.error('Could not start admin dashboard on port %s: %s', DASHBOARD_PORT, e)
+
 @bot.event
 async def on_ready():
     logger.info(f'{bot.user} has connected to Discord!')
+    start_dashboard_server()
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=f"{BOT_NAME} VPS Manager"))
     for node in get_nodes():
         try:
@@ -1081,6 +1257,41 @@ class OSSelectView(discord.ui.View):
                 await self.ctx.send(embed=create_info_embed("Notification Failed", f"Couldn't send DM to {self.user.mention}. Please ensure DMs are enabled."))
         except Exception as e:
             await interaction.followup.send(embed=create_error_embed("Creation Failed", f"Error: {str(e)}"))
+
+@bot.command(name='changepwd')
+async def change_password(ctx, vps_number: int, *, new_password: str):
+    """Change the password of one of the caller's VPS users."""
+    if len(new_password) < 4:
+        await ctx.send(embed=create_error_embed("Password Too Short", "Password must be at least 4 characters long."))
+        return
+
+    user_vps = vps_data.get(str(ctx.author.id), [])
+    if not user_vps:
+        await ctx.send(embed=create_error_embed("No VPS Found", "You do not have any VPS accounts."))
+        return
+    if vps_number < 1 or vps_number > len(user_vps):
+        await ctx.send(embed=create_error_embed("Invalid VPS", f"Choose a VPS number from 1 to {len(user_vps)}."))
+        return
+
+    vps = user_vps[vps_number - 1]
+    username = vps['container_name']
+    node_id = vps.get('node_id')
+    try:
+        # chpasswd receives the quoted username:password pair via stdin-like printf piping.
+        pair = shlex.quote(username + ':' + new_password)
+        await execute_host(
+            username,
+            f"printf '%s\n' {pair} | chpasswd && usermod -aG sudo {shlex.quote(username)}",
+            node_id=node_id
+        )
+        await ctx.send(embed=create_success_embed(
+            "Password Changed",
+            f"Password changed for VPS #{vps_number}.\n\n`sudo su` is enabled for this VPS user."
+        ))
+    except Exception as e:
+        logger.error(f"Password change failed for {username}: {e}")
+        await ctx.send(embed=create_error_embed("Password Change Failed", str(e)[:500]))
+
 
 @bot.command(name='create')
 @is_admin()
@@ -1951,76 +2162,23 @@ async def about(ctx):
 
 @bot.command(name='help')
 async def show_help(ctx):
-    """Show all commands registered with the bot."""
-
-    commands = [
-        command for command in bot.commands
-        if command.name != "help"
-    ]
-
-    commands.sort(key=lambda command: command.qualified_name.lower())
-
-    # Build command list while staying under Discord's 1024-character field limit
-    chunks = []
-    current_chunk = []
-
-    for command in commands:
-        command_text = f"`{PREFIX}{command.qualified_name}`"
-
+    """Show every registered command automatically."""
+    commands_list = sorted((c for c in bot.commands if c.name != 'help'), key=lambda c: c.qualified_name.lower())
+    embed = create_info_embed("📚 Command Help", f"All registered {BOT_NAME} commands.")
+    chunk = []
+    fields = 0
+    for command in commands_list:
+        line = f"`{PREFIX}{command.qualified_name}`"
         if command.help:
-            description = command.help.strip().splitlines()[0]
-            command_text += f" — {description}"
-
-        proposed = "\n".join(current_chunk + [command_text])
-
-        if current_chunk and len(proposed) > 1000:
-            chunks.append("\n".join(current_chunk))
-            current_chunk = []
-
-        current_chunk.append(command_text)
-
-    if current_chunk:
-        chunks.append("\n".join(current_chunk))
-
-    embed = create_info_embed(
-        "📚 Command Help",
-        f"All available {BOT_NAME} commands"
-    )
-
-    if not chunks:
-        add_field(
-            embed,
-            "Commands",
-            "No commands are currently registered.",
-            False
-        )
-        await ctx.send(embed=embed)
-        return
-
-    for index, chunk in enumerate(chunks):
-        add_field(
-            embed,
-            "📖 Commands" if index == 0 else "📖 Commands (continued)",
-            chunk,
-            False
-        )
-
-        # Discord embeds support a maximum of 25 fields
-        if len(embed.fields) >= 24 and index < len(chunks) - 1:
-            await ctx.send(embed=embed)
-
-            embed = create_info_embed(
-                "📚 Command Help (continued)",
-                f"More {BOT_NAME} commands"
-            )
-
+            line += f" — {command.help.strip().splitlines()[0]}"
+        if chunk and len('\n'.join(chunk + [line])) > 1000:
+            add_field(embed, "📖 Commands" if fields == 0 else "📖 Commands (continued)", '\n'.join(chunk), False)
+            fields += 1; chunk = []
+        chunk.append(line)
+    if chunk:
+        add_field(embed, "📖 Commands" if fields == 0 else "📖 Commands (continued)", '\n'.join(chunk), False)
+    add_field(embed, "⚠️ Reminder", "VPS here = a resource-limited Linux user account, not an isolated container/VM.", False)
     await ctx.send(embed=embed)
-
-if __name__ == "__main__":
-    if DISCORD_TOKEN:
-        bot.run(DISCORD_TOKEN)
-    else:
-        logger.error("No Discord token found in DISCORD_TOKEN environment variable.")
 
 if __name__ == "__main__":
     if DISCORD_TOKEN:
