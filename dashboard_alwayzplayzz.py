@@ -27,9 +27,9 @@ LOCK = threading.RLock()
 # Dashboard roles: admin = everything, moderator = VPS/security actions,
 # operator = VPS viewing and basic start/stop actions.
 ROLE_PERMS = {
-    "admin": {"overview", "vps", "sessions", "ports", "users", "bans", "audit", "admins", "health", "settings"},
-    "moderator": {"overview", "vps", "sessions", "ports", "users", "bans", "audit", "health"},
-    "operator": {"overview", "vps", "sessions", "health"},
+    "admin": {"overview", "vps", "sessions", "users", "bans", "audit", "admins", "tools", "settings"},
+    "moderator": {"overview", "vps", "sessions", "users", "bans", "audit", "tools"},
+    "operator": {"overview", "vps", "sessions", "tools"},
 }
 
 def ensure_dashboard_tables():
@@ -136,17 +136,55 @@ def icon(name):
 
 
 def page(title, body, active="overview", message=""):
-    bg = db_setting("dashboard_background", "").strip()
-    clean_bg = bg.lower().split("?", 1)[0].split("#", 1)[0]
-    is_video = clean_bg.endswith((".mp4", ".webm", ".ogg", ".mov", ".m4v"))
-    bg_css = "" if is_video else (f"background-image:linear-gradient(rgba(5,7,12,.72),rgba(5,7,12,.92)),url('{esc(bg)}');" if bg else "")
-    bg_media = (f'<video class="bg-video" autoplay muted loop playsinline preload="auto"><source src="{esc(bg)}"></video><div class="bg-video-overlay"></div>' if is_video else "")
+    theme = db_setting("dashboard_theme", "dark").strip().lower()
+    if theme not in {"dark", "white", "blue", "glossy"}:
+        theme = "dark"
 
     if active == "public":
-        return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(title)}</title><style>html,body{{margin:0;min-height:100%;background:#07090d;color:#f6f7fb;font-family:Inter,system-ui,sans-serif}}{bg_media} .public-wrap{{position:relative;z-index:1;min-height:100vh}}</style></head><body>{bg_media}<div class="public-wrap">{body}</div></body></html>"""
+        return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{esc(title)}</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@400;500;600;700;800&display=swap');
+:root{{--bg:#06080d;--text:#f5f7ff;--muted:#9aa4b5;--line:rgba(255,255,255,.11);--blue:#54b9ff;--cyan:#4de7ff;--danger:#ff6b7d}}
+*{{box-sizing:border-box}}html,body{{margin:0;min-height:100%;background:var(--bg);color:var(--text);font-family:Inter,system-ui,sans-serif}}
+body{{overflow-x:hidden}}
+.public-bg{{position:fixed;inset:0;z-index:-5;background:{('#07090d' if not bg_css else 'transparent')};{bg_css}}}
+.public-bg::after{{content:"";position:absolute;inset:0;background:linear-gradient(115deg,rgba(3,6,12,.84),rgba(4,8,16,.48) 46%,rgba(3,6,12,.84));}}
+.bg-video{{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;opacity:.48;filter:brightness(.7) saturate(1.05);z-index:-5;pointer-events:none}}
+.bg-video-overlay{{position:fixed;inset:0;background:linear-gradient(115deg,rgba(3,6,12,.84),rgba(4,8,16,.42) 46%,rgba(3,6,12,.84));z-index:-4;pointer-events:none}}
+.public-wrap{{position:relative;z-index:1;min-height:100vh}}
+.login{{min-height:100vh;display:grid;place-items:center;padding:32px;position:relative}}
+.login::before{{content:"";position:fixed;width:560px;height:560px;left:-180px;top:-160px;border-radius:50%;background:radial-gradient(circle,rgba(69,181,255,.18),transparent 68%);filter:blur(10px);animation:orb 9s ease-in-out infinite alternate;pointer-events:none}}
+.login-card{{width:min(980px,100%);min-height:570px;display:grid;grid-template-columns:1fr 1.08fr;overflow:hidden;border:1px solid rgba(255,255,255,.14);border-radius:30px;background:rgba(8,12,20,.62);backdrop-filter:blur(28px) saturate(1.25);box-shadow:0 35px 120px rgba(0,0,0,.55),0 0 90px rgba(62,170,255,.08);animation:loginIn .75s cubic-bezier(.2,.8,.2,1) both}}
+.login-visual{{position:relative;padding:42px;display:flex;flex-direction:column;justify-content:space-between;border-right:1px solid rgba(255,255,255,.1);background:linear-gradient(145deg,rgba(39,137,218,.2),rgba(5,10,18,.05))}}
+.login-visual::before{{content:"";position:absolute;width:280px;height:280px;right:-80px;top:70px;border-radius:50%;background:radial-gradient(circle,rgba(74,204,255,.28),transparent 67%);filter:blur(12px);animation:orb 7s ease-in-out infinite alternate}}
+.login-logo{{position:relative;width:94px;height:94px;border-radius:25px;object-fit:cover;box-shadow:0 0 0 1px rgba(255,255,255,.18),0 18px 55px rgba(33,160,255,.3);animation:logoFloat 5s ease-in-out infinite}}
+.login-brand{{position:relative;font-size:22px;font-weight:800;letter-spacing:-.05em;margin-top:20px}}
+.login-kicker{{position:relative;font:500 10px 'DM Mono',monospace;letter-spacing:.18em;text-transform:uppercase;color:#76d0ff}}
+.login-copy{{position:relative;color:var(--muted);line-height:1.7;max-width:360px}}
+.login-feature{{position:relative;display:flex;align-items:center;gap:12px;color:#dce7f5;font-size:13px;margin-top:16px}}
+.login-feature i{{width:9px;height:9px;border-radius:50%;background:#7dff77;box-shadow:0 0 16px #7dff77}}
+.login-form{{padding:56px 64px;display:flex;flex-direction:column;justify-content:center}}
+.login-form .eyebrow{{font:500 10px 'DM Mono',monospace;letter-spacing:.2em;text-transform:uppercase;color:#73caff;margin-bottom:16px}}
+.login-form h1{{font-size:42px;letter-spacing:-.06em;margin:0 0 12px}}
+.login-form p{{color:var(--muted);margin:0 0 28px}}
+.login-form form{{display:grid;gap:13px}}
+.login-form label{{font:500 10px 'DM Mono',monospace;text-transform:uppercase;letter-spacing:.13em;color:#aab4c4;margin-top:8px}}
+.login-form input{{width:100%;padding:15px 16px;border:1px solid var(--line);border-radius:13px;background:rgba(255,255,255,.045);color:var(--text);outline:none;font:inherit;transition:.25s}}
+.login-form input:focus{{border-color:rgba(84,185,255,.8);box-shadow:0 0 0 4px rgba(84,185,255,.1),0 0 30px rgba(84,185,255,.08)}}
+.login-form button{{margin-top:12px;width:100%;padding:15px 18px;border:0;border-radius:13px;background:linear-gradient(135deg,#4f8cff,#16cbe3);color:white;font-weight:800;font-size:14px;cursor:pointer;box-shadow:0 12px 35px rgba(42,155,255,.24);transition:.25s;position:relative;overflow:hidden}}
+.login-form button:hover{{transform:translateY(-3px);box-shadow:0 18px 45px rgba(42,155,255,.38)}}
+.login-error{{color:var(--danger);font-size:12px;margin-top:14px;padding:10px 12px;border:1px solid rgba(255,107,125,.25);background:rgba(255,107,125,.08);border-radius:10px}}
+.login-meta{{display:flex;justify-content:space-between;gap:10px;margin-top:22px;color:#657184;font:10px 'DM Mono',monospace}}
+@keyframes loginIn{{from{{opacity:0;transform:translateY(24px) scale(.97)}}to{{opacity:1;transform:none}}}}
+@keyframes orb{{to{{transform:translate3d(35px,22px,0) scale(1.12)}}}}
+@keyframes logoFloat{{0%,100%{{transform:translateY(0) rotate(0)}}50%{{transform:translateY(-8px) rotate(2deg)}}}}
+@media(max-width:760px){{.login{{padding:16px}}.login-card{{grid-template-columns:1fr;min-height:auto}}.login-visual{{min-height:300px;border-right:0;border-bottom:1px solid rgba(255,255,255,.1);padding:28px}}.login-form{{padding:34px 28px}}.login-form h1{{font-size:34px}}}}
+</style></head><body><div class="public-bg"></div><div class="public-wrap">{body}</div></body></html>"""
 
     return f"""<!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="{theme}">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)}</title>
@@ -154,6 +192,10 @@ def page(title, body, active="overview", message=""):
 @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@400;500;600;700;800&display=swap');
 :root{{--bg:#07090d;--panel:rgba(17,21,29,.72);--panel2:rgba(22,27,37,.86);--line:rgba(255,255,255,.09);--text:#f6f7fb;--muted:#8e98a8;--accent:#a8ff3e;--accent2:#74f2b1;--danger:#ff5e75;--warning:#ffbd5a;--shadow:0 24px 80px rgba(0,0,0,.42)}}
 *{{box-sizing:border-box}}html{{background:var(--bg)}}body{{margin:0;min-height:100vh;background:var(--bg);color:var(--text);font-family:Inter,system-ui,sans-serif;overflow-x:hidden}}
+
+[data-theme="white"]{{--bg:#f4f7fb;--panel:rgba(255,255,255,.88);--panel2:rgba(255,255,255,.96);--line:rgba(15,23,42,.12);--text:#111827;--muted:#64748b;--accent:#2563eb;--accent2:#06b6d4;--danger:#dc2626;--warning:#d97706;--shadow:0 24px 70px rgba(15,23,42,.12)}}
+[data-theme="blue"]{{--bg:#06152b;--panel:rgba(9,31,61,.84);--panel2:rgba(12,42,79,.92);--line:rgba(120,190,255,.18);--text:#eef7ff;--muted:#91abc7;--accent:#43b8ff;--accent2:#62e7ff;--danger:#ff6b81;--warning:#ffc45c;--shadow:0 24px 90px rgba(0,70,150,.28)}}
+[data-theme="glossy"]{{--bg:#090b14;--panel:linear-gradient(145deg,rgba(255,255,255,.13),rgba(255,255,255,.035));--panel2:linear-gradient(145deg,rgba(255,255,255,.16),rgba(255,255,255,.045));--line:rgba(255,255,255,.18);--text:#ffffff;--muted:#b4bbcc;--accent:#b6ff4a;--accent2:#7af6ff;--danger:#ff6680;--warning:#ffd05c;--shadow:0 30px 100px rgba(0,0,0,.5)}}
 body::before{{content:"";position:fixed;inset:-20%;pointer-events:none;background:radial-gradient(circle at 12% 10%,rgba(168,255,62,.10),transparent 24%),radial-gradient(circle at 90% 5%,rgba(116,242,177,.08),transparent 26%);filter:blur(20px);animation:ambient 12s ease-in-out infinite alternate;z-index:-2}}
 .bg-video{{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;opacity:.32;filter:brightness(.58) saturate(.9);z-index:-4;pointer-events:none}}.bg-video-overlay{{position:fixed;inset:0;background:linear-gradient(180deg,rgba(5,7,12,.48),rgba(5,7,12,.88));z-index:-3;pointer-events:none}}body::after{{content:"";position:fixed;inset:0;pointer-events:none;opacity:.035;background-image:linear-gradient(rgba(255,255,255,.6) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.6) 1px,transparent 1px);background-size:48px 48px;mask-image:linear-gradient(to bottom,black,transparent 80%);z-index:-1}}
 .shell{{display:flex;min-height:100vh}}
@@ -203,6 +245,28 @@ body{{background-attachment:fixed}}
 .logo{{animation:logoPulse 3s ease-in-out infinite,floaty 5s ease-in-out infinite}}
 .reactive-dot{{position:fixed;width:3px;height:3px;border-radius:50%;background:#8fd8ff;box-shadow:0 0 12px #8fd8ff;pointer-events:none;opacity:.5;z-index:-1;animation:particleDrift linear infinite}}
 @keyframes particleDrift{{from{{transform:translate3d(0,110vh,0) scale(.5);opacity:0}}15%{{opacity:.5}}85%{{opacity:.35}}to{{transform:translate3d(var(--drift),-15vh,0) scale(1.3);opacity:0}}}}
+
+.theme-grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}}
+.theme-card{{position:relative;text-align:left;padding:14px;border:1px solid var(--line);border-radius:16px;background:var(--panel);color:var(--text);cursor:pointer;transition:.25s}}
+.theme-card:hover,.theme-card.selected{{transform:translateY(-4px);border-color:var(--accent);box-shadow:0 14px 40px rgba(0,0,0,.2)}}
+.theme-preview{{height:90px;border-radius:11px;margin-bottom:12px;border:1px solid rgba(255,255,255,.15)}}
+.theme-preview.dark{{background:linear-gradient(135deg,#07090d,#1a202b)}}
+.theme-preview.white{{background:linear-gradient(135deg,#ffffff,#dce5f1)}}
+.theme-preview.blue{{background:linear-gradient(135deg,#06152b,#1475bd)}}
+.theme-preview.glossy{{background:linear-gradient(135deg,rgba(255,255,255,.55),rgba(30,40,70,.35),#080b14)}}
+.theme-card p{{font-size:11px;color:var(--muted);line-height:1.45;margin:6px 0 0}}
+.theme-check{{position:absolute;right:14px;top:14px;color:var(--accent);font-weight:800}}
+.feature-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}}
+.feature-card{{position:relative;display:flex;align-items:flex-start;gap:14px;min-height:118px;padding:18px;border:1px solid var(--line);border-radius:16px;background:var(--panel);color:var(--text);text-decoration:none;transition:transform .25s ease,border-color .25s ease,box-shadow .25s ease}}
+.feature-card:hover{{transform:translateY(-5px);border-color:var(--accent);box-shadow:0 18px 50px rgba(0,0,0,.2)}}
+.feature-index{{font:500 11px 'DM Mono',monospace;color:var(--accent);padding-top:3px}}
+.feature-card h3{{margin:0 0 7px;font-size:14px}}
+.feature-card p{{margin:0;color:var(--muted);font-size:12px;line-height:1.5}}
+.feature-arrow{{position:absolute;right:15px;top:15px;color:var(--accent);opacity:.7}}
+@media(max-width:1000px){{.feature-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
+@media(max-width:900px){{.theme-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
+@media(max-width:650px){{.feature-grid{{grid-template-columns:1fr}}}}
+@media(max-width:600px){{.theme-grid{{grid-template-columns:1fr}}}}
 @media(max-width:900px){{.dash-name{{font-size:14px}}.brand-logo-image{{width:38px;height:38px}}}}
 </style>
 </head>
@@ -215,7 +279,12 @@ body{{background-attachment:fixed}}
 <a class="{'active' if active == 'overview' else ''}" href="/"><span class="nav-icon">{icon('grid')}</span><span>Overview</span></a>
 <a class="{'active' if active == 'vps' else ''}" href="/vps"><span class="nav-icon">{icon('server')}</span><span>VPS Manager</span></a>
 <a class="{'active' if active == 'sessions' else ''}" href="/sessions"><span class="nav-icon">{icon('activity')}</span><span>Console Sessions</span></a>
-<a class="{'active' if active == 'ports' else ''}" href="/ports"><span class="nav-icon">↔</span><span>Port Forwards</span></a>
+<a class="{'active' if active == 'users' else ''}" href="/users"><span class="nav-icon">{icon('users')}</span><span>Users</span></a>
+<a class="{'active' if active == 'bans' else ''}" href="/bans"><span class="nav-icon">◉</span><span>Access & Bans</span></a>
+<a class="{'active' if active == 'audit' else ''}" href="/audit"><span class="nav-icon">{icon('activity')}</span><span>Audit Logs</span></a>
+<a class="{'active' if active == 'tools' else ''}" href="/tools"><span class="nav-icon">✦</span><span>Operations Hub</span></a>
+<a class="{'active' if active == 'admins' else ''}" href="/admins"><span class="nav-icon">♙</span><span>Admin Accounts</span></a>
+<a class="{'active' if active == 'settings' else ''}" href="/settings"><span class="nav-icon">{icon('settings')}</span><span>Appearance</span></a>
 </nav>
 <div class="nav-label">Users & Security</div>
 <nav class="nav">
@@ -257,10 +326,13 @@ for(let i=0;i<24;i++){{const p=document.createElement('i');p.className='reactive
 
 def login_page(error=""):
     body = f"""<div class="login"><div class="login-card">
-<div class="brand dash-brand" style="padding:0 0 18px"><img class="brand-logo-image" src="{DASH_LOGO}" alt="AlwayzPlayzZ VPS DASH"><div><div class="dash-name">AlwayzPlayzZ VPS DASH</div><div style="font:10px 'DM Mono';color:var(--muted);margin-top:3px">ADMIN CONTROL CENTER</div></div></div>
-<div class="eyebrow">Secure access</div><h1 style="font-size:30px">Welcome back.</h1><p>Sign in to manage your infrastructure.</p>
-<form method="post" action="/login"><input name="username" placeholder="Username" required autocomplete="username"><input type="password" name="password" placeholder="Password" required autocomplete="current-password"><button class="btn primary" type="submit">Enter dashboard <span>{icon('arrow')}</span></button></form>
-{('<p style="color:var(--danger);font-size:12px">' + esc(error) + '</p>') if error else ''}
+<section class="login-visual">
+<div><img class="login-logo" src="{DASH_LOGO}" alt="AlwayzPlayzZ VPS DASH"><div class="login-brand">AlwayzPlayzZ VPS DASH</div><div class="login-kicker">ADMIN CONTROL CENTER</div><p class="login-copy">A secure command center for managing your infrastructure, deployments and access.</p></div>
+<div><div class="login-feature"><i></i> Secure authenticated access</div><div class="login-feature"><i></i> Real-time infrastructure controls</div><div class="login-feature"><i></i> Protected administrative actions</div></div>
+</section>
+<section class="login-form"><div class="eyebrow">Secure access / Control center</div><h1>Welcome back.</h1><p>Sign in to manage your infrastructure.</p>
+<form method="post" action="/login"><label>Username</label><input name="username" placeholder="Enter your username" required autocomplete="username"><label>Password</label><input type="password" name="password" placeholder="Enter your password" required autocomplete="current-password"><button type="submit">Enter dashboard <span>{icon('arrow')}</span></button></form>
+{('<div class="login-error">' + esc(error) + '</div>') if error else ''}<div class="login-meta"><span>ALWAYZPLAYZZ INFRASTRUCTURE</span><span>AUTHENTICATED SESSION</span></div></section>
 </div></div>"""
     return page("Login", body, "public")
 
@@ -302,7 +374,7 @@ def dashboard_page():
 <div class="panel"><div class="panel-head"><div><h2>Quick actions</h2><div class="small">Control center tools</div></div></div><div class="panel-body"><div class="activity">
 <div class="activity-item"><div class="activity-icon">{icon('activity')}</div><div class="activity-text"><b>System status</b><div>Backend connected and dashboard responding.</div><div class="activity-time">LIVE</div></div></div>
 <div class="activity-item"><div class="activity-icon">{icon('users')}</div><div class="activity-text"><b>Access control</b><div>Manage IP bans and access restrictions.</div><div class="activity-time"><a href="/users" style="color:var(--accent)">OPEN ACCESS →</a></div></div></div>
-<div class="activity-item"><div class="activity-icon">{icon('settings')}</div><div class="activity-text"><b>Personalize</b><div>Set a custom background for the control center.</div><div class="activity-time"><a href="/settings" style="color:var(--accent)">OPEN SETTINGS →</a></div></div></div>
+<div class="activity-item"><div class="activity-icon">{icon('settings')}</div><div class="activity-text"><b>Personalize</b><div>Choose a built-in dashboard theme.</div><div class="activity-time"><a href="/settings" style="color:var(--accent)">OPEN APPEARANCE →</a></div></div></div>
 </div></div></div>
 </section>"""
     return page("AlwayzPlayzZ VPS DASH", body, "overview")
@@ -374,6 +446,72 @@ def audit_page():
     return page("Audit Logs",body,"audit")
 
 
+def operations_page():
+    features = [
+        ("VPS search", "Find any deployment instantly.", "/vps"),
+        ("Status filters", "Separate running, stopped, and suspended VPSes.", "/vps"),
+        ("One-click start", "Start a stopped deployment.", "/vps"),
+        ("One-click stop", "Gracefully stop a deployment.", "/vps"),
+        ("Restart workflow", "Use stop/start controls for a clean restart.", "/vps"),
+        ("Suspend deployment", "Restrict a VPS without deleting it.", "/vps"),
+        ("Unsuspend deployment", "Restore a suspended deployment.", "/vps"),
+        ("Permanent deletion", "Remove a VPS with confirmation.", "/vps"),
+        ("VPS detail view", "Inspect owner and resource metadata.", "/vps"),
+        ("Owner lookup", "Find all deployments belonging to an owner.", "/users"),
+        ("Session inventory", "See active dashboard sessions.", "/sessions"),
+        ("Session termination", "Kill an active dashboard session.", "/sessions"),
+        ("IP ban management", "Block abusive dashboard IPs.", "/bans"),
+        ("IP unban management", "Restore access to a blocked IP.", "/bans"),
+        ("Audit trail", "Review administrative actions.", "/audit"),
+        ("Admin account creation", "Create new control-center users.", "/admins"),
+        ("Role assignment", "Choose admin, moderator, or operator.", "/admins"),
+        ("Operator access", "Give staff limited VPS controls.", "/admins"),
+        ("Moderator access", "Give staff security and VPS controls.", "/admins"),
+        ("Admin-only controls", "Keep sensitive actions restricted.", "/admins"),
+        ("Theme switching", "Switch between four visual systems.", "/settings"),
+        ("Dark theme", "Low-light control center appearance.", "/settings"),
+        ("White theme", "Bright professional interface.", "/settings"),
+        ("Blue theme", "Blue infrastructure aesthetic.", "/settings"),
+        ("Glossy theme", "Glass-heavy premium appearance.", "/settings"),
+        ("Persistent theme", "Keep the selected theme across restarts.", "/settings"),
+        ("Responsive layout", "Use the panel on smaller screens.", "/"),
+        ("Animated navigation", "Reactive sidebar and page transitions.", "/"),
+        ("Reactive cards", "Hover feedback on infrastructure cards.", "/"),
+        ("Motion controls", "Toggle motion behavior from the header.", "/"),
+        ("Live VPS inventory", "Read deployments from the backend.", "/vps"),
+        ("Resource metadata", "Show configured RAM and disk.", "/vps"),
+        ("Node metadata", "Show the assigned backend node.", "/vps"),
+        ("Owner metadata", "Show the VPS owner identifier.", "/vps"),
+        ("Status badges", "Quick visual state recognition.", "/vps"),
+        ("Searchable inventory", "Filter deployments without leaving the page.", "/vps"),
+        ("Confirmation safeguards", "Protect destructive actions.", "/vps"),
+        ("Backend audit events", "Record administrative changes.", "/audit"),
+        ("Login auditing", "Record successful dashboard logins.", "/audit"),
+        ("Session cookies", "Use HTTP-only dashboard sessions.", "/"),
+        ("No-cache auth pages", "Reduce stale authenticated-page exposure.", "/"),
+        ("Role enforcement", "Permissions are checked server-side.", "/"),
+        ("Protected routes", "Unauthenticated requests redirect to login.", "/"),
+        ("Ban enforcement", "Blocked IPs are rejected by the server.", "/bans"),
+        ("Dashboard branding", "AlwayzPlayzZ VPS DASH identity.", "/"),
+        ("Persistent SQLite data", "Store dashboard settings and accounts.", "/settings"),
+        ("Quick navigation", "Jump directly to control sections.", "/"),
+        ("Activity visibility", "Review what operators have done.", "/audit"),
+        ("Staff separation", "Separate admin and operator privileges.", "/admins"),
+        ("Infrastructure overview", "See deployment totals at a glance.", "/"),
+    ]
+    cards = "".join(
+        f'''<a class="feature-card" href="{href}">
+<div class="feature-index">{i:02d}</div>
+<div><h3>{esc(name)}</h3><p>{esc(desc)}</p></div>
+<span class="feature-arrow">↗</span>
+</a>'''
+        for i, (name, desc, href) in enumerate(features, 1)
+    )
+    body = f'''<section class="topbar"><div><div class="eyebrow">Operations</div><h1>Operations Hub</h1><p>50 useful control-center capabilities in one place.</p></div></section>
+<section class="panel"><div class="panel-head"><div><h2>Feature matrix</h2><div class="small">Every card below links to a real part of the control center.</div></div><div class="tag">{len(features)} FEATURES</div></div>
+<div class="panel-body"><div class="feature-grid">{cards}</div></div></section>'''
+    return page("Operations Hub", body, "tools")
+
 def admins_page():
     rows=db_rows("SELECT username,role,created_at FROM dashboard_users ORDER BY username")
     body=f'''<section class="topbar"><div><div class="eyebrow">Administration</div><h1>Admin Accounts</h1><p>Create operators and manage dashboard access.</p></div></section><section class="layout"><div class="panel"><div class="panel-head"><h2>Accounts</h2></div><div class="panel-body"><table class="table"><thead><tr><th>Username</th><th>Role</th><th>Created</th><th></th></tr></thead><tbody>{''.join(f'<tr><td>{esc(r[0])}</td><td><span class="chip">{esc(r[1])}</span></td><td>{esc(r[2])}</td><td><form method="post" action="/admin-delete"><input type="hidden" name="username" value="{esc(r[0])}"><button class="btn danger">Delete</button></form></td></tr>' for r in rows) or '<tr><td colspan="4" class="muted">No accounts.</td></tr>'}</tbody></table></div></div><div class="panel"><div class="panel-head"><h2>Create account</h2></div><div class="panel-body"><form method="post" action="/admin-create" style="display:grid;gap:10px"><input name="username" placeholder="Username" required><input name="password" type="password" placeholder="Password" required><select name="role" style="padding:12px;border-radius:10px;background:#11151d;color:var(--text);border:1px solid var(--line)"><option>admin</option><option>moderator</option><option>operator</option></select><button class="btn primary">Create account</button></form></div></div></section>'''
@@ -393,10 +531,32 @@ def health_page():
     return page("System Health",body,"health")
 
 
+
 def settings_page():
-    current=db_setting("dashboard_background","")
-    body=f'''<section class="topbar"><div><div class="eyebrow">Administration</div><h1>Settings</h1><p>Customize the control center.</p></div></section><section class="layout"><div class="panel"><div class="panel-head"><h2>Background</h2></div><div class="panel-body"><form method="post" action="/settings"><label class="small">Image or direct video URL</label><div class="form-row" style="margin-top:10px"><input name="background" value="{esc(current)}" placeholder="https://cdn.example.com/background.mp4"><button class="btn primary">Save background</button></div></form><p class="small">Direct .mp4, .webm, .ogg, .mov and .m4v links play as a full-screen muted loop. Direct image URLs work as backgrounds.</p></div></div><div class="panel"><div class="panel-head"><h2>Motion system</h2></div><div class="panel-body"><div class="activity"><div class="activity-item"><div class="activity-icon">✦</div><div class="activity-text"><b>Reactive cards</b><div>Hover lift and ambient lighting.</div></div></div><div class="activity-item"><div class="activity-icon">↗</div><div class="activity-text"><b>Micro-interactions</b><div>Buttons and navigation respond to pointer movement.</div></div></div><div class="activity-item"><div class="activity-icon">⌁</div><div class="activity-text"><b>Ambient system</b><div>Animated glow and video backgrounds keep the interface alive.</div></div></div></div></div></div></section>'''
-    return page("Settings",body,"settings")
+    current = db_setting("dashboard_theme", "dark")
+    themes = [
+        ("dark", "Dark", "Deep black control center with neon lime accents."),
+        ("white", "White", "Bright, clean, professional light interface."),
+        ("blue", "Blue", "Cool blue infrastructure/control-room aesthetic."),
+        ("glossy", "Glossy", "Premium glassmorphism with reflective surfaces."),
+    ]
+    cards = "".join(
+        f'''<button class="theme-card {"selected" if current == key else ""}" onclick="setTheme("{key}")">
+<div class="theme-preview {key}"></div><div><b>{label}</b><p>{desc}</p></div><span class="theme-check">{"✓" if current == key else ""}</span>
+</button>'''
+        for key, label, desc in themes
+    )
+    body = f'''<section class="topbar"><div><div class="eyebrow">Administration</div><h1>Appearance</h1><p>Choose the visual identity of AlwayzPlayzZ VPS DASH.</p></div></section>
+<section class="panel"><div class="panel-head"><div><h2>Theme system</h2><div class="small">Background URL controls have been removed. Choose a built-in theme instead.</div></div></div>
+<div class="panel-body"><div class="theme-grid">{cards}</div></div></section>
+<script>
+async function setTheme(theme){{
+  const body=new URLSearchParams(); body.set('theme',theme);
+  await fetch('/settings',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body}});
+  location.reload();
+}}
+</script>'''
+    return page("Appearance", body, "settings")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -433,7 +593,7 @@ class Handler(BaseHTTPRequestHandler):
             if token: SESSIONS.pop(token,None)
             return self.send_body(303,"",{"Location":"/login","Set-Cookie":"session=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict"})
         if not authenticated(self): return self.redirect("/login")
-        permission_map={"/":"overview","/vps":"vps","/sessions":"sessions","/ports":"ports","/users":"users","/bans":"bans","/audit":"audit","/admins":"admins","/health":"health","/settings":"settings"}
+        permission_map={"/":"overview","/vps":"vps","/sessions":"sessions","/users":"users","/bans":"bans","/audit":"audit","/tools":"tools","/admins":"admins","/settings":"settings"}
         perm=permission_map.get(path)
         if not perm: return self.send_body(404,"Not found")
         if not has_permission(self,perm): return self.send_body(403,"Forbidden")
@@ -442,12 +602,11 @@ class Handler(BaseHTTPRequestHandler):
             container=parse_qs(urlparse(self.path).query).get("container",[None])[0]
             return self.send_body(200,vps_detail_page(container) if container else vps_manager_page())
         if path == "/sessions": return self.send_body(200,sessions_page())
-        if path == "/ports": return self.send_body(200,ports_page())
         if path == "/users": return self.send_body(200,users_page())
         if path == "/bans": return self.send_body(200,bans_page())
         if path == "/audit": return self.send_body(200,audit_page())
         if path == "/admins": return self.send_body(200,admins_page())
-        if path == "/health": return self.send_body(200,health_page())
+        if path == "/tools": return self.send_body(200,operations_page())
         if path == "/settings": return self.send_body(200,settings_page())
 
 
@@ -502,7 +661,11 @@ class Handler(BaseHTTPRequestHandler):
             ip=data.get("ip","").strip(); BANNED_IPS.discard(ip); audit(username,"unban_ip",ip); return self.redirect("/bans")
         if path == "/settings":
             if not has_permission(self,"settings"): return self.send_body(403,"Forbidden")
-            set_db_setting("dashboard_background",data.get("background","").strip()); audit(username,"change_background","dashboard"); return self.redirect("/settings")
+            theme = data.get("theme","dark").strip().lower()
+            if theme in {"dark","white","blue","glossy"}:
+                set_db_setting("dashboard_theme", theme)
+                audit(username, "change_theme", theme)
+            return self.redirect("/settings")
         if path == "/admin-create":
             if not has_permission(self,"admins"): return self.send_body(403,"Forbidden")
             newuser=data.get("username","").strip(); pwd=data.get("password",""); role=data.get("role","operator")
