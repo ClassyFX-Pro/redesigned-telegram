@@ -8,6 +8,10 @@ import asyncio
 import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+from datetime import datetime
+import json
+import time
+import shutil
 
 import bot as backend
 
@@ -19,6 +23,49 @@ PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 SESSIONS = {}
 BANNED_IPS = set()
 LOCK = threading.RLock()
+
+# Dashboard roles: admin = everything, moderator = VPS/security actions,
+# operator = VPS viewing and basic start/stop actions.
+ROLE_PERMS = {
+    "admin": {"overview", "vps", "sessions", "ports", "users", "bans", "audit", "admins", "health", "settings"},
+    "moderator": {"overview", "vps", "sessions", "ports", "users", "bans", "audit", "health"},
+    "operator": {"overview", "vps", "sessions", "health"},
+}
+
+def ensure_dashboard_tables():
+    conn = backend.get_db(); cur = conn.cursor()
+    cur.execute("CREATE TABLE IF NOT EXISTS dashboard_users (username TEXT PRIMARY KEY, password TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'operator', created_at TEXT NOT NULL)")
+    cur.execute("CREATE TABLE IF NOT EXISTS dashboard_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, action TEXT, target TEXT, created_at TEXT NOT NULL)")
+    # Seed the Railway environment admin account if it does not exist.
+    if USERNAME and PASSWORD:
+        cur.execute("SELECT 1 FROM dashboard_users WHERE username=?", (USERNAME,))
+        if not cur.fetchone():
+            cur.execute("INSERT INTO dashboard_users(username,password,role,created_at) VALUES(?,?,?,?)", (USERNAME, PASSWORD, "admin", datetime.utcnow().isoformat(timespec="seconds")))
+    conn.commit(); conn.close()
+
+def db_rows(query, args=()):
+    conn = backend.get_db(); cur = conn.cursor(); cur.execute(query, args)
+    rows = cur.fetchall(); conn.close(); return rows
+
+def audit(username, action, target=""):
+    try:
+        conn = backend.get_db(); cur = conn.cursor()
+        cur.execute("INSERT INTO dashboard_audit(username,action,target,created_at) VALUES(?,?,?,?)", (username, action, target, datetime.utcnow().isoformat(timespec="seconds")))
+        conn.commit(); conn.close()
+    except Exception:
+        log.exception("Could not write audit log")
+
+def dashboard_user(username):
+    rows = db_rows("SELECT username,password,role FROM dashboard_users WHERE username=?", (username,))
+    return dict(rows[0]) if rows else None
+
+def current_user(handler):
+    token = session_token(handler)
+    return SESSIONS.get(token) if token else None
+
+def has_permission(handler, permission):
+    user = current_user(handler)
+    return bool(user and permission in ROLE_PERMS.get(user.get("role", "operator"), set()))
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("dashboard")
@@ -89,10 +136,14 @@ def icon(name):
 
 
 def page(title, body, active="overview", message=""):
-    bg = db_setting("dashboard_background", "")
-    bg_css = ""
-    if bg:
-        bg_css = f"background-image:linear-gradient(rgba(5,7,12,.72),rgba(5,7,12,.92)),url('{esc(bg)}');"
+    bg = db_setting("dashboard_background", "").strip()
+    clean_bg = bg.lower().split("?", 1)[0].split("#", 1)[0]
+    is_video = clean_bg.endswith((".mp4", ".webm", ".ogg", ".mov", ".m4v"))
+    bg_css = "" if is_video else (f"background-image:linear-gradient(rgba(5,7,12,.72),rgba(5,7,12,.92)),url('{esc(bg)}');" if bg else "")
+    bg_media = (f'<video class="bg-video" autoplay muted loop playsinline preload="auto"><source src="{esc(bg)}"></video><div class="bg-video-overlay"></div>' if is_video else "")
+
+    if active == "public":
+        return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(title)}</title><style>html,body{{margin:0;min-height:100%;background:#07090d;color:#f6f7fb;font-family:Inter,system-ui,sans-serif}}{bg_media} .public-wrap{{position:relative;z-index:1;min-height:100vh}}</style></head><body>{bg_media}<div class="public-wrap">{body}</div></body></html>"""
 
     return f"""<!doctype html>
 <html lang="en" data-theme="dark">
@@ -104,7 +155,7 @@ def page(title, body, active="overview", message=""):
 :root{{--bg:#07090d;--panel:rgba(17,21,29,.72);--panel2:rgba(22,27,37,.86);--line:rgba(255,255,255,.09);--text:#f6f7fb;--muted:#8e98a8;--accent:#a8ff3e;--accent2:#74f2b1;--danger:#ff5e75;--warning:#ffbd5a;--shadow:0 24px 80px rgba(0,0,0,.42)}}
 *{{box-sizing:border-box}}html{{background:var(--bg)}}body{{margin:0;min-height:100vh;background:var(--bg);color:var(--text);font-family:Inter,system-ui,sans-serif;overflow-x:hidden}}
 body::before{{content:"";position:fixed;inset:-20%;pointer-events:none;background:radial-gradient(circle at 12% 10%,rgba(168,255,62,.10),transparent 24%),radial-gradient(circle at 90% 5%,rgba(116,242,177,.08),transparent 26%);filter:blur(20px);animation:ambient 12s ease-in-out infinite alternate;z-index:-2}}
-body::after{{content:"";position:fixed;inset:0;pointer-events:none;opacity:.035;background-image:linear-gradient(rgba(255,255,255,.6) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.6) 1px,transparent 1px);background-size:48px 48px;mask-image:linear-gradient(to bottom,black,transparent 80%);z-index:-1}}
+.bg-video{{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;opacity:.32;filter:brightness(.58) saturate(.9);z-index:-4;pointer-events:none}}.bg-video-overlay{{position:fixed;inset:0;background:linear-gradient(180deg,rgba(5,7,12,.48),rgba(5,7,12,.88));z-index:-3;pointer-events:none}}body::after{{content:"";position:fixed;inset:0;pointer-events:none;opacity:.035;background-image:linear-gradient(rgba(255,255,255,.6) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.6) 1px,transparent 1px);background-size:48px 48px;mask-image:linear-gradient(to bottom,black,transparent 80%);z-index:-1}}
 .shell{{display:flex;min-height:100vh}}
 .sidebar{{width:260px;position:fixed;inset:0 auto 0 0;padding:24px 16px;border-right:1px solid var(--line);background:rgba(7,9,13,.72);backdrop-filter:blur(24px);z-index:20;transition:.35s cubic-bezier(.2,.8,.2,1)}}
 .brand{{display:flex;align-items:center;gap:12px;padding:8px 12px 30px;font-weight:800;letter-spacing:-.03em;font-size:18px}}
@@ -132,7 +183,7 @@ body::after{{content:"";position:fixed;inset:0;pointer-events:none;opacity:.035;
 .form-row{{display:flex;gap:10px;align-items:center;flex-wrap:wrap}}.form-row input{{flex:1;min-width:200px}}.empty{{text-align:center;padding:48px 20px;color:var(--muted)}}.empty strong{{display:block;color:var(--text);font-size:18px;margin-bottom:8px}}
 .login{{min-height:100vh;display:grid;place-items:center;padding:24px}}.login-card{{width:min(440px,100%);padding:34px;border:1px solid var(--line);border-radius:24px;background:rgba(12,15,21,.78);backdrop-filter:blur(30px);box-shadow:0 40px 120px rgba(0,0,0,.5);animation:loginIn .8s cubic-bezier(.2,.8,.2,1) both}}.login-card form{{display:grid;gap:12px;margin-top:24px}}.login-card input,.login-card button{{width:100%;padding:14px}}
 .toast{{position:fixed;right:22px;bottom:22px;padding:14px 18px;border:1px solid rgba(168,255,62,.3);background:rgba(12,17,13,.92);border-radius:14px;box-shadow:var(--shadow);transform:translateY(30px);opacity:0;pointer-events:none;transition:.4s;z-index:99}}.toast.show{{transform:translateY(0);opacity:1}}
-.mobile-menu{{display:none}}
+.mobile-menu{{display:none}}.table{{width:100%;border-collapse:collapse}}.table th,.table td{{padding:12px 10px;text-align:left;border-bottom:1px solid var(--line);font-size:12px}}.table th{{color:var(--muted);font:500 10px "DM Mono",monospace;text-transform:uppercase;letter-spacing:.1em}}.bar{{height:8px;border-radius:99px;background:rgba(255,255,255,.08);overflow:hidden}}.bar i{{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:inherit}}.muted{{color:var(--muted)}}.metric{{font-size:28px;font-weight:800;letter-spacing:-.05em}}.split{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}}.chip{{display:inline-flex;padding:6px 9px;border-radius:999px;background:rgba(168,255,62,.09);border:1px solid rgba(168,255,62,.18);font-size:10px;color:var(--accent)}}
 @keyframes ambient{{to{{transform:translate3d(3%,2%,0) scale(1.08)}}}}@keyframes logoPulse{{50%{{box-shadow:0 0 45px rgba(168,255,62,.42);transform:rotate(3deg) scale(1.03)}}}}@keyframes blink{{50%{{opacity:.35}}}}@keyframes slideDown{{from{{opacity:0;transform:translateY(-18px)}}to{{opacity:1;transform:none}}}}@keyframes rise{{from{{opacity:0;transform:translateY(22px)}}to{{opacity:1;transform:none}}}}@keyframes fadeIn{{from{{opacity:0;transform:translateX(-10px)}}to{{opacity:1;transform:none}}}}@keyframes loginIn{{from{{opacity:0;transform:translateY(24px) scale(.97)}}to{{opacity:1;transform:none}}}}
 @media(max-width:1100px){{.grid{{grid-template-columns:repeat(2,1fr)}}.layout{{grid-template-columns:1fr}}}}
 @media(max-width:760px){{.sidebar{{transform:translateX(-100%)}}.sidebar.open{{transform:none}}.main{{margin-left:0;width:100%;padding:20px 16px 40px}}.mobile-menu{{display:inline-flex}}.grid{{grid-template-columns:1fr 1fr}}.topbar{{align-items:flex-start}}.top-actions .pill{{display:none}}.vps{{grid-template-columns:1fr}}.actions{{justify-content:flex-start}}}}
@@ -155,14 +206,27 @@ body{{background-attachment:fixed}}
 @media(max-width:900px){{.dash-name{{font-size:14px}}.brand-logo-image{{width:38px;height:38px}}}}
 </style>
 </head>
-<body>
+<body style="{bg_css}">{bg_media}
 <div class="shell">
 <aside class="sidebar" id="sidebar">
 <div class="brand"><div class="logo">{icon('server')}</div><div>{esc(backend.BOT_NAME)}<div style="font:10px 'DM Mono';color:var(--muted);margin-top:3px">CONTROL CENTER</div></div></div>
 <div class="nav-label">Workspace</div>
 <nav class="nav">
 <a class="{'active' if active == 'overview' else ''}" href="/"><span class="nav-icon">{icon('grid')}</span><span>Overview</span></a>
-<a class="{'active' if active == 'users' else ''}" href="/users"><span class="nav-icon">{icon('users')}</span><span>Access & bans</span></a>
+<a class="{'active' if active == 'vps' else ''}" href="/vps"><span class="nav-icon">{icon('server')}</span><span>VPS Manager</span></a>
+<a class="{'active' if active == 'sessions' else ''}" href="/sessions"><span class="nav-icon">{icon('activity')}</span><span>Console Sessions</span></a>
+<a class="{'active' if active == 'ports' else ''}" href="/ports"><span class="nav-icon">↔</span><span>Port Forwards</span></a>
+</nav>
+<div class="nav-label">Users & Security</div>
+<nav class="nav">
+<a class="{'active' if active == 'users' else ''}" href="/users"><span class="nav-icon">{icon('users')}</span><span>Users</span></a>
+<a class="{'active' if active == 'bans' else ''}" href="/bans"><span class="nav-icon">⛨</span><span>Access & Bans</span></a>
+<a class="{'active' if active == 'audit' else ''}" href="/audit"><span class="nav-icon">☷</span><span>Audit Logs</span></a>
+</nav>
+<div class="nav-label">Administration</div>
+<nav class="nav">
+<a class="{'active' if active == 'admins' else ''}" href="/admins"><span class="nav-icon">♟</span><span>Admin Accounts</span></a>
+<a class="{'active' if active == 'health' else ''}" href="/health"><span class="nav-icon">⌁</span><span>System Health</span></a>
 <a class="{'active' if active == 'settings' else ''}" href="/settings"><span class="nav-icon">{icon('settings')}</span><span>Settings</span></a>
 </nav>
 <div class="sidebar-bottom"><a class="nav" href="/logout"><span class="nav-icon">{icon('logout')}</span><span>Sign out</span></a></div>
@@ -198,7 +262,7 @@ def login_page(error=""):
 <form method="post" action="/login"><input name="username" placeholder="Username" required autocomplete="username"><input type="password" name="password" placeholder="Password" required autocomplete="current-password"><button class="btn primary" type="submit">Enter dashboard <span>{icon('arrow')}</span></button></form>
 {('<p style="color:var(--danger);font-size:12px">' + esc(error) + '</p>') if error else ''}
 </div></div>"""
-    return page("Login", body)
+    return page("Login", body, "public")
 
 
 def dashboard_page():
@@ -244,18 +308,95 @@ def dashboard_page():
     return page("AlwayzPlayzZ VPS DASH", body, "overview")
 
 
+def vps_records():
+    out=[]
+    with LOCK:
+        for owner_id, items in backend.vps_data.items():
+            for vps in items:
+                out.append((str(owner_id), vps))
+    return out
+
+
+def vps_manager_page():
+    rows=[]
+    for owner, vps in vps_records():
+        container=str(vps.get("container_name", "unknown")); suspended=bool(vps.get("suspended")); status="SUSPENDED" if suspended else str(vps.get("status", "unknown")).upper()
+        cls="warn" if suspended else ("" if status=="RUNNING" else "off")
+        rows.append(f'''<div class="vps" data-vps="{esc(container.lower())} {esc(owner.lower())}"><div><div class="vps-name">{esc(container)}</div><div class="vps-meta"><span class="tag">OWNER {esc(owner)}</span><span class="tag">{esc(vps.get("config","Custom"))}</span><span class="tag">{esc(vps.get("ram","0GB"))} RAM</span><span class="tag">{esc(vps.get("storage","0GB"))} DISK</span></div></div><div style="text-align:right"><div class="status {cls}"><i></i>{esc(status)}</div><div class="actions" style="margin-top:10px"><a class="btn" href="/vps?container={esc(container)}">Details</a><form method="post" action="/action"><input type="hidden" name="action" value="start"><input type="hidden" name="container" value="{esc(container)}"><button class="btn">▶</button></form><form method="post" action="/action"><input type="hidden" name="action" value="stop"><input type="hidden" name="container" value="{esc(container)}"><button class="btn">■</button></form><form method="post" action="/action"><input type="hidden" name="action" value="suspend"><input type="hidden" name="container" value="{esc(container)}"><button class="btn warning">Ⅱ</button></form></div></div></div>''')
+    body=f'''<section class="topbar"><div><div class="eyebrow">Infrastructure</div><h1>VPS Manager</h1><p>Search, inspect and control every deployment.</p></div><div style="width:min(360px,40%)"><input class="search" id="vpsSearch" oninput="filterVPS()" placeholder="Search VPS or owner..."></div></section><section class="panel"><div class="panel-body"><div class="vps-list">{''.join(rows) or '<div class="empty"><strong>No VPS deployed</strong></div>'}</div></div></section>'''
+    return page("VPS Manager",body,"vps")
+
+
+def vps_detail_page(container):
+    owner, index, vps=find_vps(container)
+    if not vps: return page("VPS not found", '<div class="empty"><strong>VPS not found</strong><a class="btn" href="/vps">Back</a></div>', "vps")
+    status="SUSPENDED" if vps.get("suspended") else str(vps.get("status","unknown")).upper()
+    body=f'''<section class="topbar"><div><div class="eyebrow">VPS details</div><h1>{esc(container)}</h1><p>Deployment owned by {esc(owner)}.</p></div><a class="btn" href="/vps">← Back to manager</a></section><section class="grid"><div class="card"><div class="stat-label">Status</div><div class="stat-value" style="font-size:26px">{esc(status)}</div><div class="stat-sub">Current backend state</div></div><div class="card"><div class="stat-label">Memory</div><div class="stat-value" style="font-size:26px">{esc(vps.get("ram","0GB"))}</div><div class="stat-sub">Configured allocation</div></div><div class="card"><div class="stat-label">Storage</div><div class="stat-value" style="font-size:26px">{esc(vps.get("storage","0GB"))}</div><div class="stat-sub">Configured allocation</div></div><div class="card"><div class="stat-label">Owner</div><div class="stat-value" style="font-size:20px">{esc(owner)}</div><div class="stat-sub">Discord user ID</div></div></section><section class="layout"><div class="panel"><div class="panel-head"><div><h2>Actions</h2><div class="small">Changes are applied to the real backend.</div></div></div><div class="panel-body"><div class="actions" style="justify-content:flex-start"><form method="post" action="/action"><input type="hidden" name="action" value="start"><input type="hidden" name="container" value="{esc(container)}"><button class="btn primary">Start</button></form><form method="post" action="/action"><input type="hidden" name="action" value="stop"><input type="hidden" name="container" value="{esc(container)}"><button class="btn">Stop</button></form><form method="post" action="/action"><input type="hidden" name="action" value="suspend"><input type="hidden" name="container" value="{esc(container)}"><button class="btn warning">Suspend</button></form><form method="post" action="/action"><input type="hidden" name="action" value="unsuspend"><input type="hidden" name="container" value="{esc(container)}"><button class="btn">Unsuspend</button></form><form method="post" action="/action" onsubmit="return confirm('Delete this VPS permanently?')"><input type="hidden" name="action" value="delete"><input type="hidden" name="container" value="{esc(container)}"><button class="btn danger">Delete VPS</button></form></div></div></div><div class="panel"><div class="panel-head"><div><h2>Metadata</h2></div></div><div class="panel-body"><table class="table">{''.join(f'<tr><th>{esc(k)}</th><td>{esc(v)}</td></tr>' for k,v in vps.items() if k not in ("password",))}</table></div></div></section>'''
+    return page(f"VPS • {container}",body,"vps")
+
+
+def sessions_page():
+    rows=[]
+    for token, sess in list(SESSIONS.items()):
+        rows.append(f'''<tr><td>{esc(sess.get("username","unknown"))}</td><td>{esc(sess.get("role","unknown"))}</td><td>{esc(sess.get("ip","unknown"))}</td><td><form method="post" action="/session-kill"><input type="hidden" name="token" value="{esc(token)}"><button class="btn danger">Terminate</button></form></td></tr>''')
+    body=f'''<section class="topbar"><div><div class="eyebrow">Security</div><h1>Console Sessions</h1><p>Active dashboard sessions and remote access activity.</p></div></section><section class="panel"><div class="panel-body"><table class="table"><thead><tr><th>User</th><th>Role</th><th>IP</th><th>Action</th></tr></thead><tbody>{''.join(rows) or '<tr><td colspan="4" class="muted">No active sessions.</td></tr>'}</tbody></table></div></section>'''
+    return page("Console Sessions",body,"sessions")
+
+
+def ports_page():
+    rows=[]
+    try:
+        for owner,vps in vps_records():
+            container=vps.get("container_name","")
+            conn=backend.get_db(); cur=conn.cursor(); cur.execute("SELECT * FROM port_forwards WHERE vps_container=?",(container,)); data=cur.fetchall(); conn.close()
+            for row in data: rows.append(f"<tr><td>{esc(container)}</td><td>{esc(owner)}</td><td>{esc(dict(row).get('host_port','?'))}</td><td>{esc(dict(row).get('container_port','?'))}</td></tr>")
+    except Exception as exc: log.warning("Port listing failed: %s", exc)
+    body=f'''<section class="topbar"><div><div class="eyebrow">Networking</div><h1>Port Forwards</h1><p>Forwarded ports currently recorded by the backend.</p></div></section><section class="panel"><div class="panel-body"><table class="table"><thead><tr><th>VPS</th><th>Owner</th><th>Host port</th><th>Container port</th></tr></thead><tbody>{''.join(rows) or '<tr><td colspan="4" class="muted">No port forwards found.</td></tr>'}</tbody></table></div></section>'''
+    return page("Port Forwards",body,"ports")
+
+
 def users_page():
-    rows = []
-    for ip in sorted(BANNED_IPS):
-        rows.append(f"<div class='vps'><div><div class='vps-name'>{esc(ip)}</div><div class='small'>Blocked from dashboard access</div></div><form method='post' action='/unban'><input type='hidden' name='ip' value='{esc(ip)}'><button class='btn primary'>Unban</button></form></div>")
-    body = f"""<section class="layout"><div class="panel"><div class="panel-head"><div><h2>Access control</h2><div class="small">Manage blocked dashboard IP addresses</div></div></div><div class="panel-body"><div class="vps-list">{''.join(rows) or '<div class="empty"><strong>No banned IPs</strong>Access control is clear.</div>'}</div></div></div><div class="panel"><div class="panel-head"><div><h2>Block an IP</h2><div class="small">The address will be denied immediately.</div></div></div><div class="panel-body"><form class="form-row" method="post" action="/ban"><input name="ip" placeholder="203.0.113.10" required><button class="btn danger">Block IP</button></form></div></div></section>"""
-    return page("AlwayzPlayzZ VPS DASH • Access & Bans", body, "users")
+    users={owner:len(items) for owner,items in backend.vps_data.items()}
+    rows=''.join(f'<tr><td>{esc(owner)}</td><td>{count}</td><td><span class="chip">VPS OWNER</span></td></tr>' for owner,count in users.items())
+    body=f'''<section class="topbar"><div><div class="eyebrow">Users</div><h1>Users</h1><p>Every VPS owner currently known to the backend.</p></div></section><section class="panel"><div class="panel-body"><table class="table"><thead><tr><th>User ID</th><th>VPS count</th><th>Type</th></tr></thead><tbody>{rows or '<tr><td colspan="3" class="muted">No users found.</td></tr>'}</tbody></table></div></section>'''
+    return page("Users",body,"users")
+
+
+def bans_page():
+    rows=''.join(f"<div class='vps'><div><div class='vps-name'>{esc(ip)}</div><div class='small'>Blocked from dashboard access</div></div><form method='post' action='/unban'><input type='hidden' name='ip' value='{esc(ip)}'><button class='btn primary'>Unban</button></form></div>" for ip in sorted(BANNED_IPS))
+    body=f'''<section class="topbar"><div><div class="eyebrow">Security</div><h1>Access & Bans</h1><p>Manage dashboard access restrictions.</p></div></section><section class="layout"><div class="panel"><div class="panel-head"><h2>Blocked IPs</h2></div><div class="panel-body"><div class="vps-list">{rows or '<div class="empty"><strong>No banned IPs</strong>Access control is clear.</div>'}</div></div></div><div class="panel"><div class="panel-head"><h2>Block an IP</h2></div><div class="panel-body"><form class="form-row" method="post" action="/ban"><input name="ip" placeholder="203.0.113.10" required><button class="btn danger">Block IP</button></form></div></div></section>'''
+    return page("Access & Bans",body,"bans")
+
+
+def audit_page():
+    rows=db_rows("SELECT username,action,target,created_at FROM dashboard_audit ORDER BY id DESC LIMIT 200")
+    body=f'''<section class="topbar"><div><div class="eyebrow">Security</div><h1>Audit Logs</h1><p>Administrative actions recorded by the dashboard.</p></div></section><section class="panel"><div class="panel-body"><table class="table"><thead><tr><th>Time</th><th>User</th><th>Action</th><th>Target</th></tr></thead><tbody>{''.join(f'<tr><td>{esc(r[3])}</td><td>{esc(r[0])}</td><td>{esc(r[1])}</td><td>{esc(r[2])}</td></tr>' for r in rows) or '<tr><td colspan="4" class="muted">No audit events yet.</td></tr>'}</tbody></table></div></section>'''
+    return page("Audit Logs",body,"audit")
+
+
+def admins_page():
+    rows=db_rows("SELECT username,role,created_at FROM dashboard_users ORDER BY username")
+    body=f'''<section class="topbar"><div><div class="eyebrow">Administration</div><h1>Admin Accounts</h1><p>Create operators and manage dashboard access.</p></div></section><section class="layout"><div class="panel"><div class="panel-head"><h2>Accounts</h2></div><div class="panel-body"><table class="table"><thead><tr><th>Username</th><th>Role</th><th>Created</th><th></th></tr></thead><tbody>{''.join(f'<tr><td>{esc(r[0])}</td><td><span class="chip">{esc(r[1])}</span></td><td>{esc(r[2])}</td><td><form method="post" action="/admin-delete"><input type="hidden" name="username" value="{esc(r[0])}"><button class="btn danger">Delete</button></form></td></tr>' for r in rows) or '<tr><td colspan="4" class="muted">No accounts.</td></tr>'}</tbody></table></div></div><div class="panel"><div class="panel-head"><h2>Create account</h2></div><div class="panel-body"><form method="post" action="/admin-create" style="display:grid;gap:10px"><input name="username" placeholder="Username" required><input name="password" type="password" placeholder="Password" required><select name="role" style="padding:12px;border-radius:10px;background:#11151d;color:var(--text);border:1px solid var(--line)"><option>admin</option><option>moderator</option><option>operator</option></select><button class="btn primary">Create account</button></form></div></div></section>'''
+    return page("Admin Accounts",body,"admins")
+
+
+def health_page():
+    try:
+        load=shutil.disk_usage("/"); disk_pct=round(load.used/load.total*100,1); disk_text=f"{load.used//(1024**3)} GB / {load.total//(1024**3)} GB"
+    except Exception: disk_pct=0; disk_text="Unavailable"
+    try:
+        import psutil
+        cpu=psutil.cpu_percent(interval=.1); ram=psutil.virtual_memory().percent
+    except Exception:
+        cpu=0; ram=0
+    body=f'''<section class="topbar"><div><div class="eyebrow">Infrastructure</div><h1>System Health</h1><p>Live host metrics and backend availability.</p></div></section><section class="grid"><div class="card"><div class="stat-label">CPU</div><div class="metric">{cpu}%</div><div class="bar"><i style="width:{min(cpu,100)}%"></i></div></div><div class="card"><div class="stat-label">RAM</div><div class="metric">{ram}%</div><div class="bar"><i style="width:{min(ram,100)}%"></i></div></div><div class="card"><div class="stat-label">Disk</div><div class="metric">{disk_pct}%</div><div class="stat-sub">{esc(disk_text)}</div></div><div class="card"><div class="stat-label">Backend</div><div class="metric">ONLINE</div><div class="stat-sub">Discord/VPS backend loaded</div></div></section>'''
+    return page("System Health",body,"health")
 
 
 def settings_page():
-    current = db_setting("dashboard_background", "")
-    body = f"""<section class="layout"><div class="panel"><div class="panel-head"><div><h2>Appearance</h2><div class="small">Make the control center yours.</div></div></div><div class="panel-body"><form method="post" action="/settings"><label class="small">Background image URL</label><div class="form-row" style="margin-top:10px"><input name="background" value="{esc(current)}" placeholder="https://example.com/background.jpg"><button class="btn primary">Save background</button></div></form><p class="small">Changes are stored in the existing persistent database.</p></div></div><div class="panel"><div class="panel-head"><div><h2>Motion system</h2><div class="small">Premium micro-interactions are enabled by default.</div></div></div><div class="panel-body"><div class="activity"><div class="activity-item"><div class="activity-icon">✦</div><div class="activity-text"><b>Staggered entrance</b><div>Cards and infrastructure rows reveal with motion.</div></div></div><div class="activity-item"><div class="activity-icon">↗</div><div class="activity-text"><b>Hover feedback</b><div>Buttons and cards respond to pointer movement.</div></div></div><div class="activity-item"><div class="activity-icon">⌁</div><div class="activity-text"><b>Ambient background</b><div>Subtle animated glow keeps the interface alive.</div></div></div></div></div></div></section>"""
-    return page("AlwayzPlayzZ VPS DASH • Settings", body, "settings")
+    current=db_setting("dashboard_background","")
+    body=f'''<section class="topbar"><div><div class="eyebrow">Administration</div><h1>Settings</h1><p>Customize the control center.</p></div></section><section class="layout"><div class="panel"><div class="panel-head"><h2>Background</h2></div><div class="panel-body"><form method="post" action="/settings"><label class="small">Image or direct video URL</label><div class="form-row" style="margin-top:10px"><input name="background" value="{esc(current)}" placeholder="https://cdn.example.com/background.mp4"><button class="btn primary">Save background</button></div></form><p class="small">Direct .mp4, .webm, .ogg, .mov and .m4v links play as a full-screen muted loop. Direct image URLs work as backgrounds.</p></div></div><div class="panel"><div class="panel-head"><h2>Motion system</h2></div><div class="panel-body"><div class="activity"><div class="activity-item"><div class="activity-icon">✦</div><div class="activity-text"><b>Reactive cards</b><div>Hover lift and ambient lighting.</div></div></div><div class="activity-item"><div class="activity-icon">↗</div><div class="activity-text"><b>Micro-interactions</b><div>Buttons and navigation respond to pointer movement.</div></div></div><div class="activity-item"><div class="activity-icon">⌁</div><div class="activity-text"><b>Ambient system</b><div>Animated glow and video backgrounds keep the interface alive.</div></div></div></div></div></div></section>'''
+    return page("Settings",body,"settings")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -266,6 +407,8 @@ class Handler(BaseHTTPRequestHandler):
         data = body.encode("utf-8") if isinstance(body, str) else body
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
         self.send_header("Content-Length", str(len(data)))
         for key, value in (headers or {}).items():
             self.send_header(key, value)
@@ -286,66 +429,94 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/login": return self.send_body(200, login_page())
         if path == "/logout":
-            token = session_token(self)
-            if token: SESSIONS.pop(token, None)
-            return self.redirect("/login")
+            token=session_token(self)
+            if token: SESSIONS.pop(token,None)
+            return self.send_body(303,"",{"Location":"/login","Set-Cookie":"session=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict"})
         if not authenticated(self): return self.redirect("/login")
-        if path == "/": return self.send_body(200, dashboard_page())
-        if path == "/users": return self.send_body(200, users_page())
-        if path == "/settings": return self.send_body(200, settings_page())
-        return self.send_body(404, "Not found")
+        permission_map={"/":"overview","/vps":"vps","/sessions":"sessions","/ports":"ports","/users":"users","/bans":"bans","/audit":"audit","/admins":"admins","/health":"health","/settings":"settings"}
+        perm=permission_map.get(path)
+        if not perm: return self.send_body(404,"Not found")
+        if not has_permission(self,perm): return self.send_body(403,"Forbidden")
+        if path == "/": return self.send_body(200,dashboard_page())
+        if path == "/vps":
+            container=parse_qs(urlparse(self.path).query).get("container",[None])[0]
+            return self.send_body(200,vps_detail_page(container) if container else vps_manager_page())
+        if path == "/sessions": return self.send_body(200,sessions_page())
+        if path == "/ports": return self.send_body(200,ports_page())
+        if path == "/users": return self.send_body(200,users_page())
+        if path == "/bans": return self.send_body(200,bans_page())
+        if path == "/audit": return self.send_body(200,audit_page())
+        if path == "/admins": return self.send_body(200,admins_page())
+        if path == "/health": return self.send_body(200,health_page())
+        if path == "/settings": return self.send_body(200,settings_page())
+
 
     def do_POST(self):
         if self.client_address[0] in BANNED_IPS:
             return self.send_body(403, "Forbidden")
-        path = urlparse(self.path).path
-        data = self.parse_form()
+        path=urlparse(self.path).path; data=self.parse_form()
         if path == "/login":
-            if PASSWORD and secrets.compare_digest(data.get("username", ""), USERNAME) and secrets.compare_digest(data.get("password", ""), PASSWORD):
-                token = secrets.token_urlsafe(32)
-                SESSIONS[token] = {"username": USERNAME, "ip": self.client_address[0]}
-                return self.send_body(303, "", {"Location": "/", "Set-Cookie": f"session={token}; Path=/; HttpOnly; SameSite=Strict"})
-            return self.send_body(401, login_page("Invalid credentials."))
+            user=dashboard_user(data.get("username",""))
+            if user and secrets.compare_digest(data.get("password",""),user["password"]):
+                token=secrets.token_urlsafe(32); SESSIONS[token]={"username":user["username"],"role":user["role"],"ip":self.client_address[0]}
+                audit(user["username"],"login",self.client_address[0])
+                return self.send_body(303,"",{"Location":"/","Set-Cookie":f"session={token}; Path=/; HttpOnly; SameSite=Strict"})
+            return self.send_body(401,login_page("Invalid credentials."))
         if not authenticated(self): return self.redirect("/login")
+        user=current_user(self); username=user.get("username","unknown")
+        if path == "/session-kill":
+            token=data.get("token","")
+            if token != session_token(self) and not has_permission(self,"sessions"): return self.send_body(403,"Forbidden")
+            SESSIONS.pop(token,None); audit(username,"terminate_session",data.get("token","")); return self.redirect("/sessions")
         if path == "/action":
-            container = data.get("container", "")
-            action = data.get("action", "")
-            owner_id, index, vps = find_vps(container)
-            if not vps: return self.redirect("/")
+            if not has_permission(self,"vps"): return self.send_body(403,"Forbidden")
+            container=data.get("container",""); action=data.get("action",""); owner_id,index,vps=find_vps(container)
+            if not vps: return self.redirect("/vps")
             try:
-                node_id = vps.get("node_id", 1)
-                if action == "start":
-                    pid = run_async(backend.start_vps(container, node_id)); vps["anchor_pid"] = pid or vps.get("anchor_pid", ""); vps["status"] = "running"; vps["suspended"] = False
-                elif action == "stop":
-                    run_async(backend.stop_vps(container, node_id)); vps["status"] = "stopped"
-                elif action == "suspend":
-                    run_async(backend.stop_vps(container, node_id)); vps["status"] = "stopped"; vps["suspended"] = True
-                elif action == "unsuspend":
-                    pid = run_async(backend.start_vps(container, node_id)); vps["anchor_pid"] = pid or vps.get("anchor_pid", ""); vps["status"] = "running"; vps["suspended"] = False
-                elif action == "delete":
-                    run_async(backend.delete_vps_user(container, node_id))
-                    conn = backend.get_db(); cur = conn.cursor()
-                    for table in ("vps", "port_forwards", "access_codes"):
-                        column = "vps_container" if table == "port_forwards" else "container_name"
-                        cur.execute(f"DELETE FROM {table} WHERE {column}=?", (container,))
-                    conn.commit(); conn.close()
-                    backend.vps_data[owner_id] = [x for x in backend.vps_data[owner_id] if x.get("container_name") != container]
+                node_id=vps.get("node_id",1)
+                if action=="start": pid=run_async(backend.start_vps(container,node_id)); vps["anchor_pid"]=pid or vps.get("anchor_pid",""); vps["status"]="running"; vps["suspended"]=False
+                elif action=="stop": run_async(backend.stop_vps(container,node_id)); vps["status"]="stopped"
+                elif action=="suspend":
+                    if not has_permission(self,"bans"): return self.send_body(403,"Forbidden")
+                    run_async(backend.stop_vps(container,node_id)); vps["status"]="stopped"; vps["suspended"]=True
+                elif action=="unsuspend":
+                    if not has_permission(self,"bans"): return self.send_body(403,"Forbidden")
+                    pid=run_async(backend.start_vps(container,node_id)); vps["anchor_pid"]=pid or vps.get("anchor_pid",""); vps["status"]="running"; vps["suspended"]=False
+                elif action=="delete":
+                    if not has_permission(self,"bans"): return self.send_body(403,"Forbidden")
+                    run_async(backend.delete_vps_user(container,node_id)); conn=backend.get_db(); cur=conn.cursor()
+                    for table in ("vps","port_forwards","access_codes"):
+                        column="vps_container" if table=="port_forwards" else "container_name"; cur.execute(f"DELETE FROM {table} WHERE {column}=?",(container,))
+                    conn.commit(); conn.close(); backend.vps_data[owner_id]=[x for x in backend.vps_data[owner_id] if x.get("container_name")!=container]
                     if not backend.vps_data[owner_id]: del backend.vps_data[owner_id]
-                backend.save_vps_data()
-            except Exception as exc:
-                log.exception("Dashboard action failed: %s", exc)
-            return self.redirect("/")
+                backend.save_vps_data(); audit(username,action,container)
+            except Exception as exc: log.exception("Dashboard action failed: %s",exc)
+            return self.redirect("/vps")
         if path == "/ban":
-            ip = data.get("ip", "").strip()
-            if ip: BANNED_IPS.add(ip)
-            return self.redirect("/users")
+            if not has_permission(self,"bans"): return self.send_body(403,"Forbidden")
+            ip=data.get("ip","").strip()
+            if ip: BANNED_IPS.add(ip); audit(username,"ban_ip",ip)
+            return self.redirect("/bans")
         if path == "/unban":
-            BANNED_IPS.discard(data.get("ip", "").strip())
-            return self.redirect("/users")
+            if not has_permission(self,"bans"): return self.send_body(403,"Forbidden")
+            ip=data.get("ip","").strip(); BANNED_IPS.discard(ip); audit(username,"unban_ip",ip); return self.redirect("/bans")
         if path == "/settings":
-            set_db_setting("dashboard_background", data.get("background", "").strip())
-            return self.redirect("/settings")
-        return self.send_body(404, "Not found")
+            if not has_permission(self,"settings"): return self.send_body(403,"Forbidden")
+            set_db_setting("dashboard_background",data.get("background","").strip()); audit(username,"change_background","dashboard"); return self.redirect("/settings")
+        if path == "/admin-create":
+            if not has_permission(self,"admins"): return self.send_body(403,"Forbidden")
+            newuser=data.get("username","").strip(); pwd=data.get("password",""); role=data.get("role","operator")
+            if newuser and pwd and role in ROLE_PERMS:
+                conn=backend.get_db(); cur=conn.cursor(); cur.execute("INSERT OR REPLACE INTO dashboard_users(username,password,role,created_at) VALUES(?,?,?,?)",(newuser,pwd,role,datetime.utcnow().isoformat(timespec="seconds"))); conn.commit(); conn.close(); audit(username,"create_dashboard_user",newuser)
+            return self.redirect("/admins")
+        if path == "/admin-delete":
+            if not has_permission(self,"admins"): return self.send_body(403,"Forbidden")
+            target=data.get("username","")
+            if target and target != USERNAME:
+                conn=backend.get_db(); cur=conn.cursor(); cur.execute("DELETE FROM dashboard_users WHERE username=?",(target,)); conn.commit(); conn.close(); audit(username,"delete_dashboard_user",target)
+            return self.redirect("/admins")
+        return self.send_body(404,"Not found")
+
 
 
 def start_bot_process():
@@ -359,6 +530,7 @@ def start_bot_process():
 
 
 def main():
+    ensure_dashboard_tables()
     if not PASSWORD:
         raise RuntimeError("DASHBOARD_PASSWORD is required")
     bot_process = start_bot_process()
