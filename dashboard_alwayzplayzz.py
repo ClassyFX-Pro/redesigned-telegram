@@ -140,6 +140,11 @@ def page(title, body, active="overview", message=""):
     if theme not in {"dark", "white", "blue", "glossy"}:
         theme = "dark"
 
+    # Background URL/video support is disabled. These variables remain defined
+    # because the existing HTML templates reference them.
+    bg_css = ""
+    bg_media = ""
+
     if active == "public":
         return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -149,7 +154,7 @@ def page(title, body, active="overview", message=""):
 :root{{--bg:#06080d;--text:#f5f7ff;--muted:#9aa4b5;--line:rgba(255,255,255,.11);--blue:#54b9ff;--cyan:#4de7ff;--danger:#ff6b7d}}
 *{{box-sizing:border-box}}html,body{{margin:0;min-height:100%;background:var(--bg);color:var(--text);font-family:Inter,system-ui,sans-serif}}
 body{{overflow-x:hidden}}
-.public-bg{{position:fixed;inset:0;z-index:-5;background:{('#07090d' if not bg_css else 'transparent')};{bg_css}}}
+.public-bg{{position:fixed;inset:0;z-index:-5;background:#07090d}}
 .public-bg::after{{content:"";position:absolute;inset:0;background:linear-gradient(115deg,rgba(3,6,12,.84),rgba(4,8,16,.48) 46%,rgba(3,6,12,.84));}}
 .bg-video{{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;opacity:.48;filter:brightness(.7) saturate(1.05);z-index:-5;pointer-events:none}}
 .bg-video-overlay{{position:fixed;inset:0;background:linear-gradient(115deg,rgba(3,6,12,.84),rgba(4,8,16,.42) 46%,rgba(3,6,12,.84));z-index:-4;pointer-events:none}}
