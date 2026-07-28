@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
     python3-venv \
+    python-is-python3 \
     passwd \
     procps \
     socat \
@@ -18,14 +19,14 @@ RUN apt-get update && apt-get install -y \
     curl \
     ca-certificates \
     bash \
-    util-linux \
     openssh-client \
+    util-linux \
     git \
+    wget \
+    unzip \
     nano \
     vim \
     htop \
-    unzip \
-    wget \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -L \
