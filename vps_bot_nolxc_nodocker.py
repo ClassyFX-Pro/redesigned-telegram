@@ -639,9 +639,9 @@ def truncate_text(text, max_length=1024):
 def create_embed(title, description="", color=0x1a1a1a):
     embed = discord.Embed(title=truncate_text(f"🌟 {BOT_NAME} - {title}", 256),
                            description=truncate_text(description, 4096), color=color)
-    embed.set_thumbnail(url="https://i.imgur.com/Tv3clt0.jpeg")
+    embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1530821352032964682/1530828818472898590/b6a2ddc9ad5a879f723f5cc9f238471d.png?ex=6a69a1ef&is=6a68506f&hm=306161d192d07ed9c3b9ed51889fab61f60e2781ac730892bc17b684d00e91b0")
     embed.set_footer(text=f"{BOT_NAME} VPS Manager v{BOT_VERSION} • {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                      icon_url="https://i.imgur.com/Tv3clt0.jpeg")
+                      icon_url="https://cdn.discordapp.com/attachments/1530821352032964682/1530828818472898590/b6a2ddc9ad5a879f723f5cc9f238471d.png?ex=6a69a1ef&is=6a68506f&hm=306161d192d07ed9c3b9ed51889fab61f60e2781ac730892bc17b684d00e91b0")
     return embed
 
 def add_field(embed, name, value, inline=False):
