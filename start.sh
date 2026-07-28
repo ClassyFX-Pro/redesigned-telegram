@@ -5,17 +5,14 @@ echo "=========================================="
 echo "   AlwayzPlayzZ VPS DASH - STARTING"
 echo "=========================================="
 
-# Start the Discord bot
 echo "[START] Starting bot.py..."
-python -u /app/bot.py &
+python3 -u bot.py &
 BOT_PID=$!
 
-# Give the bot a second to initialize
 sleep 2
 
-# Start the dashboard
-echo "[START] Starting dashboard.py on 0.0.0.0:2026..."
-python -u /app/dashboard.py &
+echo "[START] Starting dashboard.py on 0.0.0.0:${PORT:-2026}..."
+python3 -u dashboard.py &
 DASH_PID=$!
 
 cleanup() {
@@ -26,14 +23,15 @@ cleanup() {
 
 trap cleanup INT TERM EXIT
 
-while true; do
+while true
+do
     if ! kill -0 "$BOT_PID" 2>/dev/null; then
-        echo "[ERROR] bot.py exited. Stopping container."
+        echo "[ERROR] bot.py exited."
         exit 1
     fi
 
     if ! kill -0 "$DASH_PID" 2>/dev/null; then
-        echo "[ERROR] dashboard.py exited. Stopping container."
+        echo "[ERROR] dashboard.py exited."
         exit 1
     fi
 
