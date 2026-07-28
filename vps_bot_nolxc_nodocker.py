@@ -1251,30 +1251,13 @@ class OSSelectView(discord.ui.View):
             dm_embed = create_success_embed("VPS Created!", "Your VPS shell account has been deployed by an admin!")
             add_field(dm_embed, "VPS Details", f"**VPS ID:** #{vps_count}\n**Account:** `{container_name}`\n**Configuration:** {config_str}\n**Status:** Running\n**Created:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", False)
             add_field(dm_embed, "Management", f"• Use `{PREFIX}manage` to start/stop your VPS\n• Use `{PREFIX}manage` → SSH for terminal access", False)
-            logger.info(
-    "DM target: %r | type=%s | id=%s",
-    self.user,
-    type(self.user).__name__,
-    getattr(self.user, "id", None)
-)
+            try:
+                await self.user.send(embed=dm_embed)
+            except discord.Forbidden:
+                await self.ctx.send(embed=create_info_embed("Notification Failed", f"Couldn't send DM to {self.user.mention}. Please ensure DMs are enabled."))
+        except Exception as e:
+            await interaction.followup.send(embed=create_error_embed("Creation Failed", f"Error: {str(e)}"))
 
-try:
-    target = self.user
-
-    # Recover if somehow the bot itself was stored
-    if isinstance(target, discord.ClientUser):
-        logger.warning("self.user became ClientUser, recovering via fetch_user()")
-        target = await bot.fetch_user(int(user_id))
-
-    await target.send(embed=dm_embed)
-
-except discord.Forbidden:
-    await self.ctx.send(
-        embed=create_info_embed(
-            "Notification Failed",
-            f"Couldn't send DM to {self.user.mention}. Please ensure DMs are enabled."
-        )
-    )
 @bot.command(name='changepwd')
 async def change_password(ctx, vps_number: int, *, new_password: str):
     """Change the password of one of the caller's VPS users."""
