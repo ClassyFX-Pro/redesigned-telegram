@@ -16,7 +16,7 @@ import shutil
 import bot as backend
 
 HOST = "0.0.0.0"
-PORT = int(os.getenv("DASHBOARD_PORT", "2026"))
+PORT = int(os.getenv("PORT", os.getenv("DASHBOARD_PORT", "2026")))
 USERNAME = os.getenv("DASHBOARD_USERNAME", "admin")
 PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 
