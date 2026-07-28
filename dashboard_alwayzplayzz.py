@@ -685,25 +685,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.redirect("/admins")
         return self.send_body(404,"Not found")
 
-
-
-def start_bot_process():
-    bot_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.py")
-    if not os.path.exists(bot_file):
-        raise FileNotFoundError(f"bot.py not found at {bot_file}")
-    env = os.environ.copy()
-    env["DASHBOARD_PASSWORD"] = ""
-    log.info("Starting Discord bot: %s", bot_file)
-    return subprocess.Popen([sys.executable, bot_file], env=env)
-
-
 def main():
     ensure_dashboard_tables()
+
     if not PASSWORD:
         raise RuntimeError("DASHBOARD_PASSWORD is required")
-    bot_process = start_bot_process()
+
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     log.info("Animated dashboard listening on http://0.0.0.0:%s", PORT)
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
