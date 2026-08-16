@@ -20,11 +20,10 @@ echo "[TMATE] Listen port: $TMATE_PORT"
 echo "[TMATE] Advertised host: ${TMATE_HOST:-NOT SET}"
 echo "[TMATE] Advertised port: $TMATE_ADVERTISE_PORT"
 
-# Make sure the persistent key directory exists.
 mkdir -p "$TMATE_KEYS"
 
 # ============================================================
-# Generate tmate SSH host keys if missing
+# Generate host keys
 # ============================================================
 
 if [ ! -f "$TMATE_KEYS/ssh_host_rsa_key" ]; then
@@ -51,35 +50,69 @@ chmod 600 "$TMATE_KEYS"/ssh_host_*_key 2>/dev/null || true
 echo "[TMATE] Host keys ready."
 
 # ============================================================
+# Verify relay binary
+# ============================================================
+
+if ! command -v tmate-ssh-server >/dev/null 2>&1; then
+    echo "[TMATE] FATAL: tmate-ssh-server was not found!"
+    exit 1
+fi
+
+echo "[TMATE] Binary: $(command -v tmate-ssh-server)"
+
+# ============================================================
 # Start tmate SSH relay
 # ============================================================
 
 echo "[TMATE] Starting tmate-ssh-server..."
 
-TMATE_ARGS="
--p $TMATE_PORT
--q $TMATE_ADVERTISE_PORT
--k $TMATE_KEYS
-"
+# Build arguments as positional parameters instead of a string.
+set -- \
+    -p "$TMATE_PORT" \
+    -q "$TMATE_ADVERTISE_PORT" \
+    -k "$TMATE_KEYS"
 
 if [ -n "$TMATE_HOST" ]; then
-    TMATE_ARGS="$TMATE_ARGS -h $TMATE_HOST"
+    set -- "$@" -h "$TMATE_HOST"
 fi
 
-# shellcheck disable=SC2086
-tmate-ssh-server $TMATE_ARGS > /tmp/tmate-relay.log 2>&1 &
+echo "[TMATE] Command:"
+printf '[TMATE]   tmate-ssh-server'
+for arg in "$@"; do
+    printf ' %s' "$arg"
+done
+printf '\n'
+
+tmate-ssh-server "$@" > /tmp/tmate-relay.log 2>&1 &
 TMATE_PID=$!
 
 echo "[TMATE] Relay PID: $TMATE_PID"
 
-# Give relay a moment to initialize.
-sleep 2
+sleep 3
+
+# ============================================================
+# Verify relay process
+# ============================================================
 
 if ! kill -0 "$TMATE_PID" 2>/dev/null; then
-    echo "[TMATE] ERROR: tmate-ssh-server failed to start."
-    echo "[TMATE] Relay log:"
+    echo "[TMATE] FATAL: tmate-ssh-server exited during startup."
+    echo "========== TMATE RELAY LOG =========="
     cat /tmp/tmate-relay.log 2>/dev/null || true
+    echo "======================================"
     exit 1
+fi
+
+echo "[TMATE] Relay process is running."
+
+# Check that the relay actually opened the port.
+if command -v ss >/dev/null 2>&1; then
+    echo "[TMATE] Listening sockets:"
+    ss -lntp 2>/dev/null | grep ":$TMATE_PORT" || {
+        echo "[TMATE] WARNING: Nothing appears to be listening on :$TMATE_PORT"
+        echo "========== TMATE RELAY LOG =========="
+        cat /tmp/tmate-relay.log 2>/dev/null || true
+        echo "======================================"
+    }
 fi
 
 echo "[TMATE] Relay started successfully."
@@ -145,8 +178,9 @@ while true; do
     if ! kill -0 "$TMATE_PID" 2>/dev/null; then
         echo "[ERROR] tmate-ssh-server exited."
 
-        echo "[TMATE] Last relay log:"
+        echo "========== TMATE RELAY LOG =========="
         cat /tmp/tmate-relay.log 2>/dev/null || true
+        echo "======================================"
 
         exit 1
     fi
