@@ -36,7 +36,7 @@ import secrets
 #     (memory.max / cpu.max) - if that's not writable on your host, the
 #     bot falls back to *tracking* the numbers only, with no hard
 #     enforcement, and says so clearly in the VPS embed
-#   - "SSH access" = tmate run as that user, same UX as before
+#   - "SSH access" = tmate run as that user
 #   - Port forwarding = a plain `socat` process forwarding
 #     host_port -> 127.0.0.1:vps_port (no network namespace needed since
 #     there's only one network stack now)
@@ -68,15 +68,6 @@ VPS_DB_PATH = os.getenv('VPS_DB_PATH', 'vps.db')
 CGROUP_ROOT = os.getenv('CGROUP_ROOT', '/sys/fs/cgroup/vpsbot')
 LOG_DIR = os.getenv('VPS_LOG_DIR', '/var/log/vpsbot')
 
-# Web-terminal gateway (replaces tmate, which needs an outbound connection
-# to a public relay server that platforms like Railway block). Instead,
-# ttyd serves ONE web terminal on Railway's public port; a tiny gateway
-# script prompts for a one-time code and drops the user into the right
-# Linux user's shell if it matches. This only needs INBOUND traffic to
-# Railway's public port, which Railway is built to support.
-TTYD_PORT = int(os.getenv('PORT', os.getenv('TTYD_PORT', '8080')))
-PUBLIC_URL = os.getenv('RAILWAY_PUBLIC_DOMAIN', '')  # auto-set by Railway when a public domain is attached
-GATEWAY_SCRIPT_PATH = os.getenv('GATEWAY_SCRIPT_PATH', '/app/ssh_gateway.sh')
 ACCESS_CODE_TTL_SECONDS = 600
 
 # Admin web dashboard
@@ -380,63 +371,6 @@ async def ensure_prereqs(node_id: int):
         logger.error(f"Could not create bot dirs on node {node_id}: {e}")
 
 
-_TTYD_STARTED = {"value": False}
-
-async def ensure_ttyd_gateway_running(node_id: int = 1):
-    """Start the shared ttyd web-terminal gateway once using a PID file."""
-    if _TTYD_STARTED["value"]:
-        return
-
-    pidfile = "/tmp/execloud_ttyd_gateway.pid"
-    logfile = f"{LOG_DIR}/ttyd_gateway.log"
-
-    try:
-        # Do not use pgrep -f here: the pgrep command can match its own
-        # command line and falsely report that ttyd is already running.
-        check_cmd = (
-            f"if [ -f {pidfile} ] && kill -0 $(cat {pidfile}) 2>/dev/null; "
-            f"then echo running; else echo stopped; fi"
-        )
-        status = await execute_host("", check_cmd, node_id=node_id, timeout=10)
-
-        if str(status).strip() == "running":
-            _TTYD_STARTED["value"] = True
-            logger.info(f"ttyd gateway already running on port {TTYD_PORT}")
-            return
-
-        cmd = (
-            f"mkdir -p {LOG_DIR} && "
-            f"nohup ttyd -p {TTYD_PORT} -W bash {GATEWAY_SCRIPT_PATH} "
-            f">{logfile} 2>&1 < /dev/null & "
-            f"echo $! > {pidfile}"
-        )
-        await execute_host("", cmd, node_id=node_id, timeout=15)
-
-        # Verify that the process actually survived startup.
-        verify_cmd = (
-            f"sleep 1; if [ -f {pidfile} ] && kill -0 $(cat {pidfile}) 2>/dev/null; "
-            f"then echo running; else echo failed; fi"
-        )
-        verify = await execute_host("", verify_cmd, node_id=node_id, timeout=10)
-
-        if str(verify).strip() != "running":
-            logger.error(
-                f"ttyd failed to start on port {TTYD_PORT}. "
-                f"Check {logfile} on the node."
-            )
-            return
-
-        pid = await execute_host("", f"cat {pidfile}", node_id=node_id, timeout=10)
-        logger.info(
-            f"Started ttyd web-terminal gateway on port {TTYD_PORT} "
-            f"(pid {str(pid).strip()})"
-        )
-        _TTYD_STARTED["value"] = True
-
-    except Exception as e:
-        logger.error(f"Failed to start ttyd gateway: {e}")
-
-
 def generate_access_code(container_name: str) -> str:
     code = ''.join(random.choices('abcdefghjkmnpqrstuvwxyz23456789', k=8))  # no ambiguous chars
     expires_at = int(time.time()) + ACCESS_CODE_TTL_SECONDS
@@ -445,12 +379,6 @@ def generate_access_code(container_name: str) -> str:
     cur.execute('INSERT INTO access_codes (code, container_name, expires_at) VALUES (?, ?, ?)', (code, container_name, expires_at))
     conn.commit(); conn.close()
     return code
-
-
-def gateway_public_url() -> str:
-    if PUBLIC_URL:
-        return f"https://{PUBLIC_URL}"
-    return f"http://<your-railway-public-domain>:{TTYD_PORT}  (set up a Public Domain for this service in Railway → Settings → Networking)"
 
 
 async def create_vps_user(container_name: str, ram_mb: int, cpu_cores: int, node_id: int):
@@ -532,6 +460,65 @@ async def exec_in_vps(container_name: str, cmd: str, node_id: Optional[int] = No
         node_id = find_node_id_for_container(container_name)
     escaped = cmd.replace('"', '\\"')
     return await execute_host(container_name, f'su - {container_name} -c "{escaped}"', node_id=node_id, timeout=timeout)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# TMATE SSH ACCESS
+# ─────────────────────────────────────────────────────────────────────────
+async def capture_ssh_session_line(process):
+    """Reads a launched tmate process's stdout until it prints the
+    'ssh session: ssh XYZ@host.tmate.io' line, then returns just the
+    'ssh XYZ@host.tmate.io' part."""
+    while True:
+        try:
+            output = await asyncio.wait_for(process.stdout.readline(), timeout=30.0)
+            if not output:
+                break
+            line = output.decode("utf-8", errors="replace").strip()
+            if "ssh session:" in line.lower():
+                return line.split("ssh session:")[-1].strip()
+        except asyncio.TimeoutError:
+            break
+    return None
+
+
+async def start_tmate_session(container_name: str, node_id: int) -> Optional[str]:
+    """Launches tmate as the VPS's Linux user and returns the ssh connection
+    string, e.g. 'ssh AbCdEf@nyc1.tmate.io'. Requires outbound access to the
+    tmate relay (default: port 22 to tmate.io, or a self-hosted relay - see
+    TMATE_SERVER_HOST/TMATE_SERVER_PORT below)."""
+    node = get_node(node_id)
+    if not node or not node["is_local"]:
+        raise Exception("tmate sessions are currently only supported on local nodes")
+
+    tmate_args = ["tmate", "-F"]
+    server_host = os.getenv("TMATE_SERVER_HOST", "")
+    server_port = os.getenv("TMATE_SERVER_PORT", "")
+    if server_host:
+        tmate_args += ["-a", f"{server_host}:{server_port or '22'}"]
+
+    cmd = ["su", "-", container_name, "-c", " ".join(shlex.quote(a) for a in tmate_args)]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except Exception as e:
+        logger.error(f"Failed to launch tmate for {container_name}: {e}")
+        return None
+
+    ssh_line = await capture_ssh_session_line(proc)
+    if not ssh_line:
+        logger.error(
+            f"tmate produced no SSH line for {container_name} - this usually means "
+            f"outbound port {server_port or 22} to the tmate relay is blocked on this host"
+        )
+    # The tmate process (and its background ssh tunnel) is intentionally left
+    # detached/running in the background so the session stays alive after
+    # this function returns; it exits on its own when the user disconnects
+    # or the anchor/VPS user is torn down.
+    return ssh_line
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -1073,8 +1060,6 @@ async def on_ready():
             await ensure_prereqs(node['id'])
             usable = await detect_cgroups_usable(node['id'])
             logger.info(f"Node {node['name']}: cgroup resource limits {'ENABLED' if usable else 'NOT AVAILABLE (tracking only)'}")
-            if node['is_local']:
-                await ensure_ttyd_gateway_running(node['id'])
         except Exception as e:
             logger.error(f"Prereq setup failed on node {node['id']}: {e}")
     try:
@@ -1432,16 +1417,19 @@ class ManageView(discord.ui.View):
                 await interaction.followup.send(embed=create_error_embed("Access Denied", "Cannot access suspended VPS."), ephemeral=True)
                 return
             try:
-                await ensure_ttyd_gateway_running(node_id)
-                code = generate_access_code(container_name)
-                url = gateway_public_url()
-                ssh_embed = create_embed("🔑 Web Terminal Access", "SSH doesn't work on this host (outbound connections are blocked), so this uses a browser-based terminal instead:", 0x00ff88)
-                add_field(ssh_embed, "1. Open this URL", url, False)
-                add_field(ssh_embed, "2. Enter this one-time code", f"```{code}```", False)
-                add_field(ssh_embed, "⚠️ Security", f"This code expires in {ACCESS_CODE_TTL_SECONDS // 60} minutes and can only be used once. Do not share it.", False)
+                ssh_line = await start_tmate_session(container_name, node_id)
+                if not ssh_line:
+                    await interaction.followup.send(embed=create_error_embed(
+                        "SSH Failed",
+                        "Could not start a tmate session. Check the bot logs - this usually means outbound "
+                        "port 22 (or your configured TMATE_SERVER_PORT) to the tmate relay is blocked on this host."
+                    ), ephemeral=True)
+                    return
+                ssh_embed = create_embed("🔑 SSH Access", f"```{ssh_line}```", 0x00ff88)
+                add_field(ssh_embed, "⚠️ Security", "This session is live until the VPS is stopped or restarted. Do not share it.", False)
                 try:
                     await interaction.user.send(embed=ssh_embed)
-                    await interaction.followup.send(embed=create_success_embed("Access Code Sent", "Check your DMs for the web terminal link and code!"), ephemeral=True)
+                    await interaction.followup.send(embed=create_success_embed("SSH Session Sent", "Check your DMs for the SSH command!"), ephemeral=True)
                 except discord.Forbidden:
                     await interaction.followup.send(embed=ssh_embed, ephemeral=True)
             except Exception as e:
