@@ -41,21 +41,23 @@ WORKDIR /src/tmate-ssh-server
 # ============================================================
 # Debian Trixie provides msgpack-c.pc.
 # tmate-ssh-server expects msgpack.pc.
-# Create a compatibility pkg-config file.
 # ============================================================
 
 RUN set -eux; \
-    echo "=== Installed MessagePack packages ==="; \
+    echo "=========================================="; \
+    echo "MESSAGEPACK PACKAGES"; \
+    echo "=========================================="; \
     dpkg -l | grep msgpack; \
-    echo "=== Existing MessagePack pkg-config file ==="; \
+    echo ""; \
+    echo "=========================================="; \
+    echo "MESSAGEPACK PKGCONFIG"; \
+    echo "=========================================="; \
     cat /usr/lib/x86_64-linux-gnu/pkgconfig/msgpack-c.pc; \
     mkdir -p /usr/local/lib/pkgconfig; \
     cp /usr/lib/x86_64-linux-gnu/pkgconfig/msgpack-c.pc \
        /usr/local/lib/pkgconfig/msgpack.pc; \
     sed -i 's/^Name: .*/Name: msgpack/' \
-       /usr/local/lib/pkgconfig/msgpack.pc; \
-    echo "=== Created compatibility msgpack.pc ==="; \
-    cat /usr/local/lib/pkgconfig/msgpack.pc
+       /usr/local/lib/pkgconfig/msgpack.pc
 
 ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig"
 
@@ -63,10 +65,12 @@ ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfi
 # Verify MessagePack
 # ============================================================
 
-RUN echo "=== Checking msgpack ===" \
-    && pkg-config --modversion msgpack \
-    && pkg-config --cflags msgpack \
-    && pkg-config --libs msgpack
+RUN echo "==========================================" && \
+    echo "CHECKING MSGPACK" && \
+    echo "==========================================" && \
+    pkg-config --modversion msgpack && \
+    pkg-config --cflags msgpack && \
+    pkg-config --libs msgpack
 
 # ============================================================
 # Build tmate SSH server
@@ -80,16 +84,18 @@ RUN ./autogen.sh \
     && make install
 
 # ============================================================
-# Verify binary
+# Verify tmate binary
 # ============================================================
 
-RUN echo "=== tmate-ssh-server binary ===" \
-    && command -v tmate-ssh-server \
-    && ls -lh /usr/bin/tmate-ssh-server
+RUN echo "==========================================" && \
+    echo "TMATE SSH SERVER BUILD COMPLETE" && \
+    echo "==========================================" && \
+    command -v tmate-ssh-server && \
+    ls -lh /usr/bin/tmate-ssh-server
 
 
 # ============================================================
-# Final image
+# FINAL IMAGE
 # ============================================================
 
 FROM python:3.11-slim
@@ -121,7 +127,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ============================================================
-# Copy custom tmate SSH relay server
+# Copy tmate SSH relay server
 # ============================================================
 
 COPY --from=tmate-builder \
@@ -129,13 +135,14 @@ COPY --from=tmate-builder \
     /usr/bin/tmate-ssh-server
 
 # ============================================================
-# Verify final binary
+# Verify tmate in final image
 # ============================================================
 
-RUN echo "=== FINAL IMAGE ===" \
-    && ls -lh /usr/bin/tmate-ssh-server \
-    && ldd /usr/bin/tmate-ssh-server \
-    && /usr/bin/tmate-ssh-server --help >/dev/null 2>&1 || true
+RUN echo "==========================================" && \
+    echo "FINAL TMATE CHECK" && \
+    echo "==========================================" && \
+    ls -lh /usr/bin/tmate-ssh-server && \
+    ldd /usr/bin/tmate-ssh-server
 
 # ============================================================
 # Application
@@ -147,7 +154,25 @@ COPY requirements.txt /app/requirements.txt
 
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
+# Copy the entire project
 COPY . /app
+
+# ============================================================
+# VERIFY APPLICATION FILES
+# ============================================================
+
+RUN echo "==========================================" && \
+    echo "APPLICATION FILES" && \
+    echo "==========================================" && \
+    ls -la /app && \
+    echo "" && \
+    echo "Python files:" && \
+    find /app -maxdepth 3 -type f -name "*.py" -print && \
+    echo "" && \
+    echo "Checking bot.py..." && \
+    test -f /app/bot.py && \
+    echo "SUCCESS: /app/bot.py EXISTS" || \
+    (echo "ERROR: /app/bot.py DOES NOT EXIST"; exit 1)
 
 # ============================================================
 # tmate persistent directory
