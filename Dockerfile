@@ -4,21 +4,23 @@
 FROM python:3.11-slim AS tmate-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    autoconf \
-    automake \
-    cmake \
-    g++ \
-    gcc \
-    git \
-    libevent-dev \
-    libmsgpack-dev \
-    libncurses-dev \
-    libssl-dev \
-    libssh-dev \
-    linux-libc-dev \
-    make \
-    pkg-config \
-    zlib1g-dev \
+    passwd \
+    procps \
+    socat \
+    sqlite3 \
+    sudo \
+    rsync \
+    tar \
+    coreutils \
+    curl \
+    tmate \
+    openssh-client \
+    libevent-2.1-7t64 \
+    libmsgpack-c2 \
+    libncurses6 \
+    libssh-4 \
+    openssl \
+    zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src/tmate-ssh-server
