@@ -7,7 +7,6 @@ FROM python:3.11-slim AS tmate-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-
 RUN apt-get update && apt-get install -y --no-install-recommends \
     passwd \
     procps \
@@ -29,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     && rm -rf /var/lib/apt/lists/*
-
+    
 WORKDIR /src
 
 # Clone tmate SSH server
