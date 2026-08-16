@@ -13,7 +13,7 @@ import json
 import time
 import shutil
 
-import bot as backend
+import vps_bot_nolxc_nodocker as backend
 
 HOST = os.getenv("DASHBOARD_HOST", "0.0.0.0")
 PORT = int(os.getenv("DASHBOARD_PORT", "2026"))
