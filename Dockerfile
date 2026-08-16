@@ -1,15 +1,19 @@
 # ============================================================
 # AlwayzPlayzZ VPS DASH
-# Python 3.11 + tmate client + custom tmate SSH relay server
+# Python + tmate client + custom tmate SSH relay server
 # ============================================================
 
 # ============================================================
-# STAGE 1 — BUILD TMATE SSH SERVER
+# BUILDER
 # ============================================================
 
 FROM python:3.11-slim AS tmate-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
+
+# ------------------------------------------------------------
+# Build dependencies
+# ------------------------------------------------------------
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     autoconf \
@@ -27,39 +31,42 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# ------------------------------------------------------------
+# Download tmate SSH server
+# ------------------------------------------------------------
+
 WORKDIR /src
 
-# ------------------------------------------------------------
-# Clone tmate SSH server
-# ------------------------------------------------------------
-
 RUN git clone --depth 1 \
-    https://github.com/tmate-io/tmate-ssh-server.git \
-    tmate-ssh-server
+    https://github.com/tmate-io/tmate-ssh-server.git
 
 WORKDIR /src/tmate-ssh-server
 
 # ------------------------------------------------------------
-# Debian provides msgpack-c.pc rather than msgpack.pc.
+# Debian Trixie provides msgpack-c.pc rather than msgpack.pc.
 # tmate's configure script expects "msgpack".
 # Create a compatible pkg-config alias.
 # ------------------------------------------------------------
 
 RUN set -eux; \
-    echo "==========================================" ; \
-    echo "MESSAGEPACK PACKAGES" ; \
-    echo "==========================================" ; \
-    dpkg -l | grep msgpack || true ; \
-    echo "" ; \
-    echo "==========================================" ; \
-    echo "MESSAGEPACK PKGCONFIG" ; \
-    echo "==========================================" ; \
-    cat /usr/lib/x86_64-linux-gnu/pkgconfig/msgpack-c.pc ; \
-    mkdir -p /usr/local/lib/pkgconfig ; \
-    cp \
-        /usr/lib/x86_64-linux-gnu/pkgconfig/msgpack-c.pc \
-        /usr/local/lib/pkgconfig/msgpack.pc ; \
-    sed -i 's/^Name: .*/Name: msgpack/' \
+    echo "=========================================="; \
+    echo "MESSAGEPACK INFORMATION"; \
+    echo "=========================================="; \
+    dpkg -l | grep msgpack || true; \
+    echo ""; \
+    echo "Available pkg-config files:"; \
+    find /usr -name '*.pc' -type f | grep msgpack || true; \
+    echo ""; \
+    echo "MessagePack library:"; \
+    find /usr/lib /lib \
+        \( -name 'libmsgpackc.so*' -o -name 'libmsgpack-c.so*' \) \
+        -print || true; \
+    echo ""; \
+    mkdir -p /usr/local/lib/pkgconfig; \
+    test -f /usr/lib/x86_64-linux-gnu/pkgconfig/msgpack-c.pc; \
+    cp /usr/lib/x86_64-linux-gnu/pkgconfig/msgpack-c.pc \
+        /usr/local/lib/pkgconfig/msgpack.pc; \
+    sed -i 's/^Name:.*/Name: msgpack/' \
         /usr/local/lib/pkgconfig/msgpack.pc
 
 ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig"
@@ -68,37 +75,38 @@ ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfi
 # Verify MessagePack
 # ------------------------------------------------------------
 
-RUN echo "==========================================" \
-    && echo "CHECKING MSGPACK" \
-    && echo "==========================================" \
-    && pkg-config --modversion msgpack \
-    && pkg-config --cflags msgpack \
-    && pkg-config --libs msgpack
+RUN echo "==========================================" && \
+    echo "CHECKING MSGPACK" && \
+    echo "==========================================" && \
+    pkg-config --modversion msgpack && \
+    pkg-config --cflags msgpack && \
+    pkg-config --libs msgpack
 
 # ------------------------------------------------------------
 # Build tmate SSH server
 # ------------------------------------------------------------
 
-RUN ./autogen.sh \
-    && ./configure \
+RUN ./autogen.sh && \
+    ./configure \
         --prefix=/usr \
-        CFLAGS="-D_GNU_SOURCE" \
-    && make -j"$(nproc)" \
-    && make install
+        CFLAGS="-D_GNU_SOURCE" && \
+    make -j"$(nproc)" && \
+    make install
 
 # ------------------------------------------------------------
-# Verify build
+# Verify compiled binary
 # ------------------------------------------------------------
 
-RUN echo "==========================================" \
-    && echo "TMATE SSH SERVER BUILD COMPLETE" \
-    && echo "==========================================" \
-    && command -v tmate-ssh-server \
-    && ls -lh /usr/bin/tmate-ssh-server
+RUN echo "==========================================" && \
+    echo "TMATE SSH SERVER BUILD COMPLETE" && \
+    echo "==========================================" && \
+    command -v tmate-ssh-server && \
+    ls -lh /usr/bin/tmate-ssh-server && \
+    ldd /usr/bin/tmate-ssh-server
 
 
 # ============================================================
-# STAGE 2 — FINAL APPLICATION IMAGE
+# FINAL IMAGE
 # ============================================================
 
 FROM python:3.11-slim
@@ -138,16 +146,14 @@ COPY --from=tmate-builder \
     /usr/bin/tmate-ssh-server
 
 # ------------------------------------------------------------
-# Verify tmate binary and libraries
+# Verify tmate exists in final image
 # ------------------------------------------------------------
 
-RUN echo "==========================================" \
-    && echo "FINAL TMATE CHECK" \
-    && echo "==========================================" \
-    && ls -lh /usr/bin/tmate-ssh-server \
-    && ldd /usr/bin/tmate-ssh-server \
-    && /usr/bin/tmate-ssh-server --help >/dev/null 2>&1 || true
-
+RUN echo "==========================================" && \
+    echo "FINAL TMATE CHECK" && \
+    echo "==========================================" && \
+    ls -lh /usr/bin/tmate-ssh-server && \
+    ldd /usr/bin/tmate-ssh-server
 
 # ============================================================
 # APPLICATION
@@ -170,36 +176,52 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY . /app
 
 # ------------------------------------------------------------
+# IMPORTANT:
+# dashboard_alwayzplayzz.py currently contains:
+#
+#     import bot as backend
+#
+# Your actual backend is:
+#
+#     vps_bot_nolxc_nodocker.py
+#
+# Create a compatibility copy called bot.py.
+# ------------------------------------------------------------
+
+RUN cp /app/vps_bot_nolxc_nodocker.py /app/bot.py
+
+# ------------------------------------------------------------
 # Verify application files
 # ------------------------------------------------------------
 
-RUN echo "==========================================" \
-    && echo "APPLICATION FILES" \
-    && echo "==========================================" \
-    && ls -la /app \
-    && echo "" \
-    && echo "Python files:" \
-    && find /app -maxdepth 3 -type f -name "*.py" -print \
-    && echo "" \
-    && echo "Checking VPS bot..." \
-    && test -f /app/vps_bot_nolxc_nodocker.py \
-    && echo "SUCCESS: VPS bot exists" \
-    && echo "" \
-    && echo "Checking dashboard..." \
-    && test -f /app/dashboard_alwayzplayzz.py \
-    && echo "SUCCESS: Dashboard exists" \
-    && echo "" \
-    && echo "Checking start.sh..." \
-    && test -f /app/start.sh \
-    && echo "SUCCESS: start.sh exists"
+RUN echo "==========================================" && \
+    echo "APPLICATION FILES" && \
+    echo "==========================================" && \
+    ls -lah /app && \
+    echo "" && \
+    echo "Python files:" && \
+    find /app -maxdepth 2 -type f -name '*.py' -print && \
+    echo "" && \
+    echo "Checking required files..." && \
+    test -f /app/vps_bot_nolxc_nodocker.py && \
+    test -f /app/bot.py && \
+    test -f /app/dashboard_alwayzplayzz.py && \
+    test -f /app/start.sh && \
+    echo "ALL REQUIRED FILES EXIST"
+
+# ------------------------------------------------------------
+# Make start script executable
+# ------------------------------------------------------------
+
+RUN chmod +x /app/start.sh
 
 # ============================================================
 # TMATE STORAGE
 # ============================================================
 
-RUN mkdir -p /tmate/keys \
-    && chmod 700 /tmate \
-    && chmod 700 /tmate/keys
+RUN mkdir -p /tmate/keys && \
+    chmod 700 /tmate && \
+    chmod 700 /tmate/keys
 
 # ============================================================
 # ENVIRONMENT
@@ -209,13 +231,7 @@ ENV SSH_KEYS_PATH=/tmate/keys
 ENV SSH_PORT_LISTEN=2222
 
 # ============================================================
-# START SCRIPT
-# ============================================================
-
-RUN chmod +x /app/start.sh
-
-# ============================================================
-# START CONTAINER
+# START
 # ============================================================
 
 CMD ["/app/start.sh"]
