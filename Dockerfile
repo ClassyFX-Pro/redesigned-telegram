@@ -8,19 +8,25 @@ FROM python:3.11-slim AS tmate-builder
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    autoconf \
-    automake \
-    build-essential \
-    ca-certificates \
-    cmake \
-    git \
-    libevent-dev \
-    libmsgpack-dev \
-    libncurses-dev \
-    libssl-dev \
-    libssh-dev \
-    pkg-config \
-    zlib1g-dev \
+    passwd \
+    procps \
+    socat \
+    sqlite3 \
+    sudo \
+    rsync \
+    tar \
+    coreutils \
+    curl \
+    openssh-client \
+    openssh-server \
+    libevent-2.1-7t64 \
+    libmsgpack-c2 \
+    libncurses6 \
+    libssh-4 \
+    openssl \
+    zlib1g \
+    python3 \
+    python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
