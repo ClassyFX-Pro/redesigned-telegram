@@ -517,16 +517,19 @@ async def _tmate_network_diagnostic(container_name: str, host: str, port: int) -
 
 
 async def start_tmate_session(container_name: str, node_id: int) -> Optional[str]:
-    """Start tmate for a VPS user and return its SSH connection string.
+    """Start tmate for a VPS user using the configured self-hosted relay.
 
     Railway/PaaS-friendly behavior:
-      * TMATE_SERVER_HOST + TMATE_SERVER_PORT configure an explicit relay.
-      * If TMATE_SERVER_HOST is unset, TMATE_SERVER_PORT is ignored rather
-        than being incorrectly reported as the active port.
-      * stdout and stderr are consumed concurrently, preventing a pipe from
-        filling while tmate is connecting.
-      * failures include the actual tmate output, exit code, and connectivity
-        diagnostics instead of guessing that port 22 is blocked.
+      * TMATE_SERVER_HOST + TMATE_SERVER_PORT select the relay.
+      * The relay SSH fingerprints can be supplied through
+        TMATE_SERVER_ED25519_FINGERPRINT / TMATE_SERVER_RSA_FINGERPRINT.
+      * If fingerprints are not supplied, they are calculated from the local
+        /tmate/keys host public keys when available.
+      * A per-VPS ~/.tmate.conf is generated so tmate does NOT fall back to
+        ssh.tmate.io.
+      * stdout/stderr are consumed concurrently.
+      * The tmate process is intentionally kept alive after the SSH URL is
+        obtained.
     """
     node = get_node(node_id)
     if not node or not node["is_local"]:
@@ -534,29 +537,134 @@ async def start_tmate_session(container_name: str, node_id: int) -> Optional[str
 
     server_host = os.getenv("TMATE_SERVER_HOST", "").strip()
     raw_port = os.getenv("TMATE_SERVER_PORT", "").strip()
+
+    if not server_host:
+        logger.error(
+            "TMATE_SERVER_HOST is not configured. Refusing to start tmate because "
+            "the VPS should use the self-hosted relay instead of ssh.tmate.io."
+        )
+        return None
+
     try:
         server_port = int(raw_port) if raw_port else 22
+        if not (1 <= server_port <= 65535):
+            raise ValueError
     except ValueError:
-        logger.error("Invalid TMATE_SERVER_PORT=%r; expected an integer port", raw_port)
-        server_port = 22
-        raw_port = ""
+        logger.error("Invalid TMATE_SERVER_PORT=%r; expected 1-65535", raw_port)
+        return None
 
-    if raw_port and not server_host:
-        logger.warning(
-            "TMATE_SERVER_PORT=%s is set but TMATE_SERVER_HOST is not set; "
-            "the port will NOT be passed to tmate. Remove TMATE_SERVER_PORT or "
-            "set both variables for a custom relay.", raw_port
+    # The Railway public proxy normally points to the local tmate-ssh-server.
+    # These can be overridden explicitly in Railway variables.
+    relay_rsa_fp = os.getenv("TMATE_SERVER_RSA_FINGERPRINT", "").strip()
+    relay_ed25519_fp = os.getenv("TMATE_SERVER_ED25519_FINGERPRINT", "").strip()
+
+    # If fingerprints were not supplied, derive them from the same persistent
+    # host keys used by tmate-ssh-server. This prevents a mismatch when the
+    # relay keys are stored on the Railway volume.
+    relay_keys_dir = os.getenv("SSH_KEYS_PATH", "/tmate/keys").strip() or "/tmate/keys"
+
+    async def fingerprint_for(pub_file: str) -> str:
+        try:
+            out = await execute_host(
+                container_name,
+                f"ssh-keygen -lf {shlex.quote(pub_file)} -E sha256 2>/dev/null | "
+                f"awk '{{print $2}}' | head -1",
+                node_id=node_id,
+                timeout=10,
+            )
+            return str(out).strip()
+        except Exception:
+            return ""
+
+    if not relay_ed25519_fp:
+        relay_ed25519_fp = await fingerprint_for(
+            f"{relay_keys_dir}/ssh_host_ed25519_key.pub"
         )
-        
-    tmate_args = ["tmate", "-F"]
-    relay_description = "tmate configured relay"
+    if not relay_rsa_fp:
+        relay_rsa_fp = await fingerprint_for(
+            f"{relay_keys_dir}/ssh_host_rsa_key.pub"
+        )
 
-    cmd = ["su", "-", container_name, "-c", " ".join(shlex.quote(a) for a in tmate_args)]
-    logger.info("Starting tmate for %s; relay=%s; command=%s", container_name, relay_description, cmd)
+    # A tmate config file is required because `tmate -F` by itself uses the
+    # default public tmate.io relay. The original code read TMATE_SERVER_* but
+    # never actually passed those settings to the tmate client.
+    home = _home_dir(container_name)
+    config_path = f"{home}/.tmate.conf"
 
-    if server_host:
-        diagnostic = await _tmate_network_diagnostic(container_name, server_host, server_port)
-        logger.info("tmate preflight for %s: %s", container_name, diagnostic)
+    config_lines = [
+        f'set -g tmate-server-host "{server_host}"',
+        f"set -g tmate-server-port {server_port}",
+    ]
+
+    if relay_rsa_fp:
+        config_lines.append(
+            f'set -g tmate-server-rsa-fingerprint "{relay_rsa_fp}"'
+        )
+    if relay_ed25519_fp:
+        config_lines.append(
+            f'set -g tmate-server-ed25519-fingerprint "{relay_ed25519_fp}"'
+        )
+
+    # Keep tmate from waiting unnecessarily for terminal/UI behavior.
+    config_lines.append("set -g tmate-display-time 30000")
+
+    config_content = "\n".join(config_lines) + "\n"
+
+    try:
+        # Write the config as root, then make it readable only by the VPS user.
+        await execute_host(
+            container_name,
+            f"printf '%s' {shlex.quote(config_content)} > {shlex.quote(config_path)} "
+            f"&& chown {shlex.quote(container_name)}:{shlex.quote(container_name)} {shlex.quote(config_path)} "
+            f"&& chmod 600 {shlex.quote(config_path)}",
+            node_id=node_id,
+            timeout=15,
+        )
+    except Exception as e:
+        logger.error("Could not create tmate config for %s: %s", container_name, e)
+        return None
+
+    diagnostic = await _tmate_network_diagnostic(
+        container_name, server_host, server_port
+    )
+    logger.info(
+        "tmate preflight for %s: %s | relay=%s:%s | ed25519_fp=%s | rsa_fp=%s",
+        container_name,
+        diagnostic,
+        server_host,
+        server_port,
+        relay_ed25519_fp or "NOT SET",
+        relay_rsa_fp or "NOT SET",
+    )
+
+    # Use a unique socket per VPS so multiple users can have simultaneous
+    # tmate sessions without sharing one tmux/tmate server socket.
+    socket_name = f"vps-{re.sub(r'[^A-Za-z0-9_-]', '-', container_name)[:80]}"
+
+    tmate_args = [
+        "tmate",
+        "-F",
+        "-f",
+        config_path,
+        "-L",
+        socket_name,
+    ]
+
+    cmd = [
+        "su",
+        "-",
+        container_name,
+        "-c",
+        " ".join(shlex.quote(a) for a in tmate_args),
+    ]
+
+    logger.info(
+        "Starting tmate for %s; relay=%s:%s; command=%s",
+        container_name,
+        server_host,
+        server_port,
+        cmd,
+    )
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -565,7 +673,10 @@ async def start_tmate_session(container_name: str, node_id: int) -> Optional[str
             stderr=asyncio.subprocess.PIPE,
         )
     except FileNotFoundError:
-        logger.error("tmate binary is not installed/available in PATH for %s", container_name)
+        logger.error(
+            "tmate binary is not installed/available in PATH for %s",
+            container_name,
+        )
         return None
     except Exception as e:
         logger.exception("Failed to launch tmate for %s: %s", container_name, e)
@@ -573,13 +684,36 @@ async def start_tmate_session(container_name: str, node_id: int) -> Optional[str
 
     output_lines: list[str] = []
     ssh_result: dict = {"line": None}
-    stdout_task = asyncio.create_task(_read_tmate_stream(proc.stdout, "stdout", output_lines, ssh_result))
-    stderr_task = asyncio.create_task(_read_tmate_stream(proc.stderr, "stderr", output_lines, ssh_result))
+
+    stdout_task = asyncio.create_task(
+        _read_tmate_stream(proc.stdout, "stdout", output_lines, ssh_result)
+    )
+    stderr_task = asyncio.create_task(
+        _read_tmate_stream(proc.stderr, "stderr", output_lines, ssh_result)
+    )
+
+    # Keep references so the tasks/process are not garbage-collected after the
+    # function returns. This is important because the SSH session must remain
+    # alive after Discord receives the connection string.
+    if not hasattr(start_tmate_session, "_live_sessions"):
+        start_tmate_session._live_sessions = {}
+
+    session_key = f"{container_name}:{socket_name}"
+    start_tmate_session._live_sessions[session_key] = {
+        "proc": proc,
+        "stdout_task": stdout_task,
+        "stderr_task": stderr_task,
+        "config_path": config_path,
+        "socket_name": socket_name,
+    }
 
     try:
-        # A normal connection should produce the SSH line quickly, but allow
-        # slower PaaS networking enough time before declaring failure.
-        deadline = asyncio.get_running_loop().time() + 45.0
+        # Self-hosted Railway relays can take longer than public tmate.io.
+        timeout_seconds = int(os.getenv("TMATE_CONNECT_TIMEOUT", "90"))
+        timeout_seconds = max(30, min(timeout_seconds, 300))
+
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+
         while ssh_result["line"] is None and proc.returncode is None:
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
@@ -587,51 +721,70 @@ async def start_tmate_session(container_name: str, node_id: int) -> Optional[str
             await asyncio.sleep(min(0.25, remaining))
 
         if ssh_result["line"]:
-            logger.info("tmate session established for %s: %s", container_name, ssh_result["line"])
-            # Keep tmate alive after this function returns. The stream readers
-            # are deliberately left attached to the running process.
+            logger.info(
+                "tmate session established for %s via %s:%s: %s",
+                container_name,
+                server_host,
+                server_port,
+                ssh_result["line"],
+            )
+            # Do NOT terminate or cancel the process/tasks here.
             return ssh_result["line"]
 
         if proc.returncode is None:
-            logger.error("tmate timed out after 45s for %s; terminating failed session", container_name)
+            logger.error(
+                "tmate timed out after %ss for %s; terminating failed session",
+                timeout_seconds,
+                container_name,
+            )
             try:
                 proc.terminate()
                 await asyncio.wait_for(proc.wait(), timeout=5)
             except Exception:
                 try:
                     proc.kill()
+                    await proc.wait()
                 except Exception:
                     pass
         else:
-            logger.error("tmate exited early for %s with return code %s", container_name, proc.returncode)
+            logger.error(
+                "tmate exited early for %s with return code %s",
+                container_name,
+                proc.returncode,
+            )
 
-        # Give the readers a moment to consume the final stderr/stdout lines.
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.5)
+
         if output_lines:
-            logger.error("tmate diagnostics for %s:\n%s", container_name, "\n".join(output_lines[-80:]))
+            logger.error(
+                "tmate diagnostics for %s:\n%s",
+                container_name,
+                "\n".join(output_lines[-100:]),
+            )
         else:
-            logger.error("tmate produced no stdout/stderr output for %s", container_name)
+            logger.error(
+                "tmate produced no stdout/stderr output for %s",
+                container_name,
+            )
 
-        if server_host:
-            logger.error(
-                "tmate relay configured as %s. If the preflight TCP test failed, "
-                "Railway/network policy is blocking that relay/port; changing the "
-                "Discord bot code cannot bypass that restriction. Use a reachable relay/port.",
-                relay_description,
-            )
-        else:
-            logger.error(
-                "tmate is using its built-in/default relay. If its connection fails on Railway, "
-                "check Railway outbound-network restrictions and the tmate stderr above. "
-                "TMATE_SERVER_PORT alone does not change the default relay port."
-            )
+        logger.error(
+            "tmate relay: %s:%s | config=%s | socket=%s",
+            server_host,
+            server_port,
+            config_path,
+            socket_name,
+        )
         return None
+
     finally:
         if ssh_result["line"] is None:
             for task in (stdout_task, stderr_task):
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+            await asyncio.gather(
+                stdout_task, stderr_task, return_exceptions=True
+            )
+            start_tmate_session._live_sessions.pop(session_key, None)
 
 
 # ─────────────────────────────────────────────────────────────────────────
