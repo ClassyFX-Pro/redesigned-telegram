@@ -1,4 +1,3 @@
-```sh
 #!/bin/sh
 set -eu
 
@@ -7,46 +6,31 @@ echo "   AlwayzPlayzZ VPS DASH - STARTING"
 echo "   Discord Bot + Dashboard + tmate Relay"
 echo "=========================================="
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
 TMATE_KEYS="${SSH_KEYS_PATH:-/tmate/keys}"
 TMATE_PORT="${SSH_PORT_LISTEN:-2222}"
-TMATE_PUBLIC_HOST="${TMATE_SERVER_HOST:-sakura.proxy.rlwy.net}"
-TMATE_PUBLIC_PORT="${TMATE_SERVER_PORT:-53743}"
-
-echo "[TMATE] Key directory: $TMATE_KEYS"
-echo "[TMATE] Listen port: $TMATE_PORT"
-echo "[TMATE] Public host: $TMATE_PUBLIC_HOST"
-echo "[TMATE] Public port: $TMATE_PUBLIC_PORT"
-
-# ============================================================
-# CREATE TMATE DIRECTORIES
-# ============================================================
+TMATE_PUBLIC_HOST="${TMATE_SERVER_HOST:-}"
+TMATE_PUBLIC_PORT="${TMATE_SERVER_PORT:-}"
 
 mkdir -p "$TMATE_KEYS"
 chmod 700 "$TMATE_KEYS"
 
+echo "[TMATE] Key directory: $TMATE_KEYS"
+echo "[TMATE] Listen port: $TMATE_PORT"
+
 # ============================================================
-# GENERATE TMATE SSH HOST KEYS
+# HOST KEYS
 # ============================================================
 
 if [ ! -f "$TMATE_KEYS/ssh_host_rsa_key" ]; then
     echo "[TMATE] Generating RSA host key..."
-
-    ssh-keygen \
-        -t rsa \
-        -b 4096 \
+    ssh-keygen -t rsa -b 4096 \
         -f "$TMATE_KEYS/ssh_host_rsa_key" \
         -N ""
 fi
 
 if [ ! -f "$TMATE_KEYS/ssh_host_ed25519_key" ]; then
     echo "[TMATE] Generating ED25519 host key..."
-
-    ssh-keygen \
-        -t ed25519 \
+    ssh-keygen -t ed25519 \
         -f "$TMATE_KEYS/ssh_host_ed25519_key" \
         -N ""
 fi
@@ -56,74 +40,124 @@ chmod 600 "$TMATE_KEYS"/ssh_host_*_key 2>/dev/null || true
 echo "[TMATE] Host keys ready."
 
 # ============================================================
-# CHECK TMATE SSH SERVER
+# TMATE SERVER
 # ============================================================
 
 if [ ! -x /usr/bin/tmate-ssh-server ]; then
-    echo "[TMATE] ERROR: /usr/bin/tmate-ssh-server does not exist."
+    echo "[TMATE] ERROR: /usr/bin/tmate-ssh-server not found."
     exit 1
 fi
 
-echo "[TMATE] tmate-ssh-server found:"
-ls -lh /usr/bin/tmate-ssh-server
+echo "[TMATE] tmate-ssh-server found."
 
-# ============================================================
-# START TMATE SSH RELAY
-# ============================================================
+TMATE_PID=""
 
-echo "[TMATE] Starting tmate-ssh-server..."
+# Check whether our requested port is already occupied.
+PORT_IN_USE=0
 
-rm -f /tmp/tmate-relay.log
-
-/usr/bin/tmate-ssh-server \
-    -p "$TMATE_PORT" \
-    -q "$TMATE_PUBLIC_PORT" \
-    -h "$TMATE_PUBLIC_HOST" \
-    -k "$TMATE_KEYS" \
-    > /tmp/tmate-relay.log 2>&1 &
-
-TMATE_PID=$!
-
-echo "[TMATE] Relay PID: $TMATE_PID"
-
-# ============================================================
-# WAIT FOR TMATE RELAY
-# ============================================================
-
-sleep 2
-
-if ! kill -0 "$TMATE_PID" 2>/dev/null; then
-    echo "[TMATE] =========================================="
-    echo "[TMATE] ERROR: Relay failed to start"
-    echo "[TMATE] =========================================="
-    cat /tmp/tmate-relay.log 2>/dev/null || true
-    exit 1
+if command -v ss >/dev/null 2>&1; then
+    if ss -lnt 2>/dev/null | grep -q ":${TMATE_PORT} "; then
+        PORT_IN_USE=1
+    fi
+elif command -v netstat >/dev/null 2>&1; then
+    if netstat -lnt 2>/dev/null | grep -q ":${TMATE_PORT} "; then
+        PORT_IN_USE=1
+    fi
 fi
 
-echo "[TMATE] Relay started successfully."
+if [ "$PORT_IN_USE" = "1" ]; then
+    echo "[TMATE] Port $TMATE_PORT is already in use."
+
+    # Determine whether it is actually tmate-ssh-server.
+    EXISTING_PID="$(pgrep -f "/usr/bin/tmate-ssh-server.*-p $TMATE_PORT" 2>/dev/null | head -n 1 || true)"
+
+    if [ -n "$EXISTING_PID" ]; then
+        echo "[TMATE] Existing tmate-ssh-server found."
+        echo "[TMATE] Existing PID: $EXISTING_PID"
+
+        TMATE_PID="$EXISTING_PID"
+    else
+        echo "[TMATE] ERROR: Port $TMATE_PORT is occupied by another process."
+        echo "[TMATE] Cannot safely start tmate relay."
+        exit 1
+    fi
+else
+    echo "[TMATE] Starting tmate-ssh-server on port $TMATE_PORT..."
+
+    rm -f /tmp/tmate-relay.log
+
+    TMATE_ARGS="
+        -p $TMATE_PORT
+        -k $TMATE_KEYS
+    "
+
+    # Add advertised public endpoint if configured.
+    if [ -n "$TMATE_PUBLIC_HOST" ] && [ -n "$TMATE_PUBLIC_PORT" ]; then
+        echo "[TMATE] Public host: $TMATE_PUBLIC_HOST"
+        echo "[TMATE] Public port: $TMATE_PUBLIC_PORT"
+
+        /usr/bin/tmate-ssh-server \
+            -p "$TMATE_PORT" \
+            -q "$TMATE_PUBLIC_PORT" \
+            -h "$TMATE_PUBLIC_HOST" \
+            -k "$TMATE_KEYS" \
+            > /tmp/tmate-relay.log 2>&1 &
+    else
+        /usr/bin/tmate-ssh-server \
+            -p "$TMATE_PORT" \
+            -k "$TMATE_KEYS" \
+            > /tmp/tmate-relay.log 2>&1 &
+    fi
+
+    TMATE_PID=$!
+
+    sleep 2
+
+    if ! kill -0 "$TMATE_PID" 2>/dev/null; then
+        echo ""
+        echo "=========================================="
+        echo "   TMATE FAILED TO START"
+        echo "=========================================="
+
+        cat /tmp/tmate-relay.log 2>/dev/null || true
+
+        exit 1
+    fi
+
+    echo "[TMATE] Started successfully."
+    echo "[TMATE] PID: $TMATE_PID"
+fi
+
+# ============================================================
+# VERIFY TMATE
+# ============================================================
+
+if [ -n "$TMATE_PID" ]; then
+    if ! kill -0 "$TMATE_PID" 2>/dev/null; then
+        echo "[TMATE] ERROR: tmate process is not running."
+        exit 1
+    fi
+fi
 
 if command -v ss >/dev/null 2>&1; then
     echo "[TMATE] Listening sockets:"
-    ss -lntp 2>/dev/null | grep ":$TMATE_PORT " || \
-        echo "[TMATE] WARNING: Port $TMATE_PORT not visible yet."
+    ss -lntp 2>/dev/null | grep ":$TMATE_PORT " || true
 fi
+
+echo "[TMATE] Relay is ready."
 
 # ============================================================
 # START DISCORD BOT
 # ============================================================
 
+echo ""
 echo "=========================================="
 echo "[START] Starting Discord bot..."
-echo "[START] /app/vps_bot_nolxc_nodocker.py"
 echo "=========================================="
 
 if [ ! -f /app/vps_bot_nolxc_nodocker.py ]; then
     echo "[ERROR] Bot file does not exist:"
     echo "/app/vps_bot_nolxc_nodocker.py"
-
-    echo "[ERROR] Available Python files:"
-    find /app -maxdepth 3 -type f -name "*.py" -print
-
     exit 1
 fi
 
@@ -135,13 +169,7 @@ echo "[START] BOT PID: $BOT_PID"
 sleep 2
 
 if ! kill -0 "$BOT_PID" 2>/dev/null; then
-    echo "[ERROR] Bot exited immediately."
-
-    if [ -f /tmp/tmate-relay.log ]; then
-        echo "[TMATE] Relay log:"
-        cat /tmp/tmate-relay.log || true
-    fi
-
+    echo "[ERROR] Discord bot exited immediately."
     exit 1
 fi
 
@@ -149,9 +177,9 @@ fi
 # START DASHBOARD
 # ============================================================
 
+echo ""
 echo "=========================================="
 echo "[START] Starting dashboard..."
-echo "[START] /app/dashboard_alwayzplayzz.py"
 echo "=========================================="
 
 if [ ! -f /app/dashboard_alwayzplayzz.py ]; then
@@ -173,7 +201,7 @@ if ! kill -0 "$DASH_PID" 2>/dev/null; then
 fi
 
 # ============================================================
-# SERVICES STARTED
+# ALL SERVICES STARTED
 # ============================================================
 
 echo ""
@@ -184,7 +212,15 @@ echo "[START] BOT PID:       $BOT_PID"
 echo "[START] DASHBOARD PID: $DASH_PID"
 echo "[START] TMATE PID:     $TMATE_PID"
 echo "[START] TMATE PORT:    $TMATE_PORT"
-echo "[START] TMATE PUBLIC:  $TMATE_PUBLIC_HOST:$TMATE_PUBLIC_PORT"
+
+if [ -n "$TMATE_PUBLIC_HOST" ]; then
+    echo "[START] TMATE HOST:    $TMATE_PUBLIC_HOST"
+fi
+
+if [ -n "$TMATE_PUBLIC_PORT" ]; then
+    echo "[START] TMATE PUB PORT: $TMATE_PUBLIC_PORT"
+fi
+
 echo "=========================================="
 echo ""
 
@@ -198,24 +234,30 @@ cleanup() {
     echo "   SHUTTING DOWN"
     echo "=========================================="
 
-    if kill -0 "$BOT_PID" 2>/dev/null; then
-        echo "[STOP] Stopping bot..."
-        kill "$BOT_PID" 2>/dev/null || true
+    if [ -n "${BOT_PID:-}" ]; then
+        if kill -0 "$BOT_PID" 2>/dev/null; then
+            echo "[STOP] Stopping bot..."
+            kill "$BOT_PID" 2>/dev/null || true
+        fi
     fi
 
-    if kill -0 "$DASH_PID" 2>/dev/null; then
-        echo "[STOP] Stopping dashboard..."
-        kill "$DASH_PID" 2>/dev/null || true
+    if [ -n "${DASH_PID:-}" ]; then
+        if kill -0 "$DASH_PID" 2>/dev/null; then
+            echo "[STOP] Stopping dashboard..."
+            kill "$DASH_PID" 2>/dev/null || true
+        fi
     fi
 
-    if kill -0 "$TMATE_PID" 2>/dev/null; then
-        echo "[STOP] Stopping tmate relay..."
-        kill "$TMATE_PID" 2>/dev/null || true
+    # Only stop tmate if THIS start.sh started it.
+    if [ -n "${TMATE_PID:-}" ] && [ "${TMATE_STARTED:-0}" = "1" ]; then
+        if kill -0 "$TMATE_PID" 2>/dev/null; then
+            echo "[STOP] Stopping tmate relay..."
+            kill "$TMATE_PID" 2>/dev/null || true
+        fi
     fi
 
     wait "$BOT_PID" 2>/dev/null || true
     wait "$DASH_PID" 2>/dev/null || true
-    wait "$TMATE_PID" 2>/dev/null || true
 
     echo "[STOP] Shutdown complete."
 }
@@ -223,48 +265,36 @@ cleanup() {
 trap cleanup INT TERM EXIT
 
 # ============================================================
-# MONITOR SERVICES
+# MONITOR
 # ============================================================
 
 while true; do
 
-    # --------------------------------------------------------
-    # BOT
-    # --------------------------------------------------------
-
     if ! kill -0 "$BOT_PID" 2>/dev/null; then
         echo "[ERROR] Discord bot exited."
-        cleanup
         exit 1
     fi
-
-    # --------------------------------------------------------
-    # DASHBOARD
-    # --------------------------------------------------------
 
     if ! kill -0 "$DASH_PID" 2>/dev/null; then
         echo "[ERROR] Dashboard exited."
-        cleanup
         exit 1
     fi
 
-    # --------------------------------------------------------
-    # TMATE
-    # --------------------------------------------------------
+    if [ -n "$TMATE_PID" ]; then
+        if ! kill -0 "$TMATE_PID" 2>/dev/null; then
+            echo "[ERROR] tmate-ssh-server exited."
 
-    if ! kill -0 "$TMATE_PID" 2>/dev/null; then
-        echo "[ERROR] tmate-ssh-server exited."
+            if [ -f /tmp/tmate-relay.log ]; then
+                echo ""
+                echo "========== TMATE LOG =========="
+                cat /tmp/tmate-relay.log || true
+                echo "==============================="
+            fi
 
-        echo ""
-        echo "========== TMATE LOG =========="
-        cat /tmp/tmate-relay.log 2>/dev/null || true
-        echo "==============================="
-
-        cleanup
-        exit 1
+            exit 1
+        fi
     fi
 
     sleep 5
 
 done
-```
