@@ -1,3 +1,4 @@
+```sh
 #!/bin/sh
 set -eu
 
@@ -12,9 +13,13 @@ echo "=========================================="
 
 TMATE_KEYS="${SSH_KEYS_PATH:-/tmate/keys}"
 TMATE_PORT="${SSH_PORT_LISTEN:-2222}"
+TMATE_PUBLIC_HOST="${TMATE_SERVER_HOST:-sakura.proxy.rlwy.net}"
+TMATE_PUBLIC_PORT="${TMATE_SERVER_PORT:-53743}"
 
 echo "[TMATE] Key directory: $TMATE_KEYS"
 echo "[TMATE] Listen port: $TMATE_PORT"
+echo "[TMATE] Public host: $TMATE_PUBLIC_HOST"
+echo "[TMATE] Public port: $TMATE_PUBLIC_PORT"
 
 # ============================================================
 # CREATE TMATE DIRECTORIES
@@ -72,6 +77,8 @@ rm -f /tmp/tmate-relay.log
 
 /usr/bin/tmate-ssh-server \
     -p "$TMATE_PORT" \
+    -q "$TMATE_PUBLIC_PORT" \
+    -h "$TMATE_PUBLIC_HOST" \
     -k "$TMATE_KEYS" \
     > /tmp/tmate-relay.log 2>&1 &
 
@@ -95,7 +102,6 @@ fi
 
 echo "[TMATE] Relay started successfully."
 
-# Check whether it is actually listening
 if command -v ss >/dev/null 2>&1; then
     echo "[TMATE] Listening sockets:"
     ss -lntp 2>/dev/null | grep ":$TMATE_PORT " || \
@@ -151,7 +157,6 @@ echo "=========================================="
 if [ ! -f /app/dashboard_alwayzplayzz.py ]; then
     echo "[ERROR] Dashboard file does not exist:"
     echo "/app/dashboard_alwayzplayzz.py"
-
     exit 1
 fi
 
@@ -179,6 +184,7 @@ echo "[START] BOT PID:       $BOT_PID"
 echo "[START] DASHBOARD PID: $DASH_PID"
 echo "[START] TMATE PID:     $TMATE_PID"
 echo "[START] TMATE PORT:    $TMATE_PORT"
+echo "[START] TMATE PUBLIC:  $TMATE_PUBLIC_HOST:$TMATE_PUBLIC_PORT"
 echo "=========================================="
 echo ""
 
@@ -228,7 +234,6 @@ while true; do
 
     if ! kill -0 "$BOT_PID" 2>/dev/null; then
         echo "[ERROR] Discord bot exited."
-
         cleanup
         exit 1
     fi
@@ -239,7 +244,6 @@ while true; do
 
     if ! kill -0 "$DASH_PID" 2>/dev/null; then
         echo "[ERROR] Dashboard exited."
-
         cleanup
         exit 1
     fi
@@ -263,3 +267,4 @@ while true; do
     sleep 5
 
 done
+```
