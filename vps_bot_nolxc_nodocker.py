@@ -547,9 +547,9 @@ async def start_tmate_session(container_name: str, node_id: int) -> Optional[str
             "the port will NOT be passed to tmate. Remove TMATE_SERVER_PORT or "
             "set both variables for a custom relay.", raw_port
         )
-
-  tmate_args = ["tmate", "-F"]
-relay_description = "tmate configured relay"
+        
+    tmate_args = ["tmate", "-F"]
+    relay_description = "tmate configured relay"
 
     cmd = ["su", "-", container_name, "-c", " ".join(shlex.quote(a) for a in tmate_args)]
     logger.info("Starting tmate for %s; relay=%s; command=%s", container_name, relay_description, cmd)
